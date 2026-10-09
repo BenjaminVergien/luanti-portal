@@ -23,10 +23,10 @@ class LuantiServerRegistryTest extends TestCase
 {
     use RefreshDatabase;
 
-    /** @return array{name: string, ip_address: string, game_port: int} */
+    /** @return array{name: string, domain: string, game_port: int} */
     private function serverData(): array
     {
-        return ['name' => 'Testserver', 'ip_address' => '192.0.2.10', 'game_port' => 30000];
+        return ['name' => 'Testserver', 'domain' => 'alpha.example.test', 'game_port' => 30000];
     }
 
     public function test_admin_registers_multiple_servers_without_contacting_them(): void
@@ -37,7 +37,7 @@ class LuantiServerRegistryTest extends TestCase
 
         $first = $registry->create($admin, $this->serverData());
         $second = $registry->create($admin, [
-            'name' => ' Zweiter Server ', 'notes' => "Erste Zeile\nZweite Zeile", 'ip_address' => '2001:db8::10',
+            'name' => ' Zweiter Server ', 'notes' => "Erste Zeile\nZweite Zeile", 'domain' => 'second.example.test',
             'game_port' => 65535, 'api_base_url' => 'https://bridge.example.test:8443/api/v1',
         ]);
 
@@ -45,30 +45,30 @@ class LuantiServerRegistryTest extends TestCase
         $this->assertDatabaseHas('luanti_servers', ['id' => $first->id, ...$this->serverData(), 'api_base_url' => null, 'api_token' => null]);
         $this->assertDatabaseHas('luanti_servers', [
             'id' => $second->id, 'name' => 'Zweiter Server', 'notes' => "Erste Zeile\nZweite Zeile",
-            'ip_address' => '2001:db8::10', 'game_port' => 65535, 'api_base_url' => 'https://bridge.example.test:8443/api/v1', 'api_token' => null,
+            'domain' => 'second.example.test', 'game_port' => 65535, 'api_base_url' => 'https://bridge.example.test:8443/api/v1', 'api_token' => null,
         ]);
         $this->assertSame([$first->id, $second->id], $registry->query($admin)->orderBy('id')->pluck('id')->all());
         Http::assertNothingSent();
     }
 
-    public static function validAddressesAndPorts(): array
+    public static function validDomainsAndPorts(): array
     {
         return [
-            'IPv4 and minimum port' => ['192.0.2.1', 1],
-            'IPv4 and maximum port' => ['192.0.2.1', 65535],
-            'IPv6 and minimum port' => ['2001:db8::1', 1],
-            'IPv6 and maximum port' => ['2001:db8::1', 65535],
+            'domain and minimum port' => ['luanti.example.test', 1],
+            'domain and maximum port' => ['luanti.example.test', 65535],
+            'subdomain' => ['world-1.luanti.example.test', 30000],
+            'punycode' => ['xn--bcher-kva.example.test', 30000],
         ];
     }
 
-    #[DataProvider('validAddressesAndPorts')]
-    public function test_registers_valid_ip_addresses_and_port_boundaries(string $ipAddress, int $gamePort): void
+    #[DataProvider('validDomainsAndPorts')]
+    public function test_registers_valid_domaines_and_port_boundaries(string $domain, int $gamePort): void
     {
         $admin = User::factory()->globalAdmin()->create();
 
-        app(LuantiServerRegistry::class)->create($admin, [...$this->serverData(), 'ip_address' => $ipAddress, 'game_port' => $gamePort]);
+        app(LuantiServerRegistry::class)->create($admin, [...$this->serverData(), 'domain' => $domain, 'game_port' => $gamePort]);
 
-        $this->assertDatabaseHas('luanti_servers', ['ip_address' => $ipAddress, 'game_port' => $gamePort]);
+        $this->assertDatabaseHas('luanti_servers', ['domain' => $domain, 'game_port' => $gamePort]);
     }
 
     public static function invalidServerData(): array
@@ -79,9 +79,18 @@ class LuantiServerRegistryTest extends TestCase
             'long name' => ['name', str_repeat('n', 256), 'max'],
             'non-string name' => ['name', ['invalid'], 'string'],
             'non-string notes' => ['notes', [], 'string'],
-            'missing IP' => ['ip_address', null, 'required'],
-            'hostname' => ['ip_address', 'server.example.test', 'ip'],
-            'invalid IP' => ['ip_address', '999.0.0.1', 'ip'],
+            'missing domain' => ['domain', null, 'required'],
+            'IPv4' => ['domain', '192.0.2.10', 'regex'],
+            'IPv6' => ['domain', '2001:db8::10', 'regex'],
+            'URL instead of domain' => ['domain', 'https://server.example.test', 'regex'],
+            'domain with port' => ['domain', 'server.example.test:30000', 'regex'],
+            'domain with path' => ['domain', 'server.example.test/api', 'regex'],
+            'domain with space' => ['domain', 'server example.test', 'regex'],
+            'empty label' => ['domain', 'server..example.test', 'regex'],
+            'leading hyphen' => ['domain', '-server.example.test', 'regex'],
+            'trailing hyphen' => ['domain', 'server-.example.test', 'regex'],
+            'long label' => ['domain', str_repeat('a', 64).'.example.test', 'regex'],
+            'long domain' => ['domain', str_repeat('a', 254), 'max'],
             'missing port' => ['game_port', null, 'required'],
             'zero port' => ['game_port', 0, 'between'],
             'negative port' => ['game_port', -1, 'between'],
@@ -93,6 +102,31 @@ class LuantiServerRegistryTest extends TestCase
             'long endpoint' => ['api_base_url', 'https://bridge.example.test/'.str_repeat('a', 2048), 'max'],
             'non-string token' => ['api_token', [], 'string'],
         ];
+    }
+
+    public function test_domain_is_trimmed_and_lowercased_without_resolving_dns(): void
+    {
+        $admin = User::factory()->globalAdmin()->create();
+
+        app(LuantiServerRegistry::class)->create($admin, [...$this->serverData(), 'domain' => ' LuAnTi.Example.TEST ']);
+
+        $this->assertDatabaseHas('luanti_servers', ['domain' => 'luanti.example.test']);
+    }
+
+    public function test_domain_migration_preserves_existing_addresses_and_encrypted_credentials(): void
+    {
+        $server = LuantiServer::factory()->create(['api_token' => 'existing-token', 'notes' => 'Existing notes']);
+        $ciphertext = $server->getRawOriginal('api_token');
+        $migration = require database_path('migrations/2026_10_09_195727_replace_luanti_server_ip_address_with_domain.php');
+        $migration->down();
+        DB::table('luanti_servers')->where('id', $server->id)->update(['ip_address' => '192.0.2.10']);
+
+        $migration->up();
+
+        $this->assertDatabaseHas('luanti_servers', [
+            'id' => $server->id, 'domain' => '192.0.2.10', 'notes' => 'Existing notes', 'api_token' => $ciphertext,
+        ]);
+        $this->assertSame('existing-token', $server->fresh()->api_token);
     }
 
     #[DataProvider('invalidServerData')]
@@ -125,7 +159,7 @@ class LuantiServerRegistryTest extends TestCase
         $this->assertStringNotContainsString($token, $ciphertext);
         $this->assertSame($token, $server->fresh()->api_token);
         $this->assertSame([
-            'name', 'notes', 'ip_address', 'game_port', 'api_base_url', 'updated_at', 'created_at', 'id',
+            'name', 'notes', 'domain', 'game_port', 'api_base_url', 'updated_at', 'created_at', 'id',
         ], array_keys($server->toArray()));
         $this->assertStringNotContainsString($token, $server->toJson());
         $this->assertStringNotContainsString($ciphertext, $server->toJson());
@@ -239,7 +273,7 @@ class LuantiServerRegistryTest extends TestCase
         $this->seed(LuantiServerSeeder::class);
 
         $this->assertDatabaseCount('luanti_servers', 1);
-        $this->assertDatabaseHas('luanti_servers', ['ip_address' => '192.0.2.10', 'api_base_url' => null, 'api_token' => null]);
+        $this->assertDatabaseHas('luanti_servers', ['domain' => 'luanti.example.test', 'api_base_url' => null, 'api_token' => null]);
     }
 
     public function test_example_seeder_is_refused_outside_local_environment(): void

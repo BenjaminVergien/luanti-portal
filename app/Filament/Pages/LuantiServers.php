@@ -41,14 +41,14 @@ class LuantiServers extends AccessTablePage
     {
         return $table->query(fn () => app(LuantiServerRegistry::class)->query($this->actor()))->columns([
             TextColumn::make('name')->label('Name')->searchable()->sortable(),
-            TextColumn::make('ip_address')->label('IP-Adresse')->sortable(),
+            TextColumn::make('domain')->label('Domain')->sortable(),
             TextColumn::make('game_port')->label('Spiel-Port'),
             TextColumn::make('api_base_url')->label('HTTPS-API-URL')->placeholder('Nicht konfiguriert')->wrap(),
             IconColumn::make('has_api_token')->label('API-Token hinterlegt')
                 ->getStateUsing(fn (LuantiServer $record): bool => filled($record->getRawOriginal('api_token')))->boolean(),
         ])->recordActions([
             Action::make('edit')->label('Bearbeiten')
-                ->fillForm(fn (LuantiServer $record): array => $record->only(['name', 'notes', 'ip_address', 'game_port', 'api_base_url']))
+                ->fillForm(fn (LuantiServer $record): array => $record->only(['name', 'notes', 'domain', 'game_port', 'api_base_url']))
                 ->schema($this->serverFields())
                 ->action(function (LuantiServer $record, array $data): void {
                     app(LuantiServerRegistry::class)->update($this->actor(), $record, $data);
@@ -76,8 +76,8 @@ class LuantiServers extends AccessTablePage
         return [
             TextInput::make('name')->label('Name')->required()->maxLength(255),
             Textarea::make('notes')->label('Notizen')->rows(3),
-            TextInput::make('ip_address')->label('IP-Adresse')->required()->rules(['ip'])
-                ->helperText('IPv4- oder IPv6-Adresse des Spielservers.'),
+            TextInput::make('domain')->label('Domain')->required()->maxLength(253)->rules(LuantiServerRegistry::domainRules())
+                ->helperText('Domain des Spielservers, z. B. luanti.example.org (ohne https://, Port oder Pfad).'),
             TextInput::make('game_port')->label('Spiel-Port')->required()->integer()->minValue(1)->maxValue(65535),
             TextInput::make('api_base_url')->label('HTTPS-API-URL')->maxLength(2048)->rules(['url:https'])
                 ->helperText('Optionaler Endpunkt der zukünftigen Bridge. Die Verbindung wird noch nicht geprüft.'),

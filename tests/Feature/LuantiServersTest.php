@@ -27,10 +27,10 @@ class LuantiServersTest extends TestCase
         Filament::setTenant(null);
     }
 
-    /** @return array{name: string, ip_address: string, game_port: int} */
+    /** @return array{name: string, domain: string, game_port: int} */
     private function serverData(): array
     {
-        return ['name' => 'Neuer Server', 'ip_address' => '192.0.2.10', 'game_port' => 30000];
+        return ['name' => 'Neuer Server', 'domain' => 'alpha.example.test', 'game_port' => 30000];
     }
 
     public function test_guests_are_redirected_to_admin_login(): void
@@ -51,13 +51,13 @@ class LuantiServersTest extends TestCase
     public function test_admin_lists_searches_and_sorts_servers_without_exposing_tokens(): void
     {
         $this->adminPanel(User::factory()->globalAdmin()->create());
-        $first = LuantiServer::factory()->create(['name' => 'Alpha', 'ip_address' => '192.0.2.10', 'api_token' => 'protected-secret']);
-        $second = LuantiServer::factory()->create(['name' => 'Zulu', 'ip_address' => '192.0.2.20']);
+        $first = LuantiServer::factory()->create(['name' => 'Alpha', 'domain' => 'alpha.example.test', 'api_token' => 'protected-secret']);
+        $second = LuantiServer::factory()->create(['name' => 'Zulu', 'domain' => 'zulu.example.test']);
 
         $page = Livewire::test(LuantiServers::class)->assertOk()->assertCanSeeTableRecords([$first, $second])
             ->assertDontSee('protected-secret')->assertDontSee($first->getRawOriginal('api_token'))
             ->sortTable('name')->assertCanSeeTableRecords([$first, $second], inOrder: true)
-            ->sortTable('ip_address', 'desc')->assertCanSeeTableRecords([$second, $first], inOrder: true);
+            ->sortTable('domain', 'desc')->assertCanSeeTableRecords([$second, $first], inOrder: true);
         $page->searchTable('Alpha')->assertCanSeeTableRecords([$first])->assertCanNotSeeTableRecords([$second]);
     }
 
@@ -83,9 +83,9 @@ class LuantiServersTest extends TestCase
         $this->adminPanel(User::factory()->globalAdmin()->create());
 
         $page = Livewire::test(LuantiServers::class)->callAction('create')
-            ->assertHasActionErrors(['name' => 'required', 'ip_address' => 'required', 'game_port' => 'required']);
-        $page->fillForm(['name' => 'Server', 'ip_address' => 'host.example.test', 'game_port' => 65536, 'api_base_url' => 'http://bridge.example.test'])
-            ->callMountedAction()->assertHasActionErrors(['ip_address' => 'ip', 'game_port' => 'max', 'api_base_url' => 'url']);
+            ->assertHasActionErrors(['name' => 'required', 'domain' => 'required', 'game_port' => 'required']);
+        $page->fillForm(['name' => 'Server', 'domain' => 'https://host.example.test', 'game_port' => 65536, 'api_base_url' => 'http://bridge.example.test'])
+            ->callMountedAction()->assertHasActionErrors(['domain' => 'regex', 'game_port' => 'max', 'api_base_url' => 'url']);
 
         $this->assertDatabaseCount('luanti_servers', 0);
     }
@@ -103,10 +103,10 @@ class LuantiServersTest extends TestCase
         $this->assertStringNotContainsString('saved-secret', $payload);
         $this->assertStringNotContainsString($ciphertext, $payload);
 
-        $page->fillForm(['name' => 'Geänderter Server', 'api_token' => ''])
+        $page->fillForm(['name' => 'Geänderter Server', 'domain' => 'updated.example.test', 'api_token' => ''])
             ->callMountedAction()->assertHasNoActionErrors()->assertNotified('Gespeichert');
 
-        $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'name' => 'Geänderter Server', 'api_token' => $ciphertext]);
+        $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'name' => 'Geänderter Server', 'domain' => 'updated.example.test', 'api_token' => $ciphertext]);
     }
 
     public function test_edit_form_replaces_token_without_returning_it(): void

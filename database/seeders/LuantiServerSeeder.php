@@ -16,7 +16,7 @@ class LuantiServerSeeder extends Seeder
 
         LuantiServer::query()->firstOrCreate(
             ['name' => 'Luanti-Beispielserver'],
-            ['ip_address' => '192.0.2.10', 'game_port' => 30000, 'notes' => 'Fiktiver Server für die lokale Entwicklung.'],
+            ['domain' => 'luanti.example.test', 'game_port' => 30000, 'notes' => 'Fiktiver Server für die lokale Entwicklung.'],
         );
     }
 }

@@ -13,6 +13,16 @@ class LuantiServerRegistry
 {
     public function __construct(private PortalAccess $access) {}
 
+    /**
+     * Validate a DNS hostname without performing a DNS lookup.
+     *
+     * @return list<string>
+     */
+    public static function domainRules(): array
+    {
+        return ['required', 'string', 'max:253', 'regex:/\\A(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?\\z/i'];
+    }
+
     /** @return Builder<LuantiServer> */
     public function query(User $actor): Builder
     {
@@ -21,7 +31,7 @@ class LuantiServerRegistry
         return LuantiServer::query();
     }
 
-    /** @param array{name?: mixed, notes?: mixed, ip_address?: mixed, game_port?: mixed, api_base_url?: mixed, api_token?: mixed} $data */
+    /** @param array{name?: mixed, notes?: mixed, domain?: mixed, game_port?: mixed, api_base_url?: mixed, api_token?: mixed} $data */
     public function create(User $actor, #[SensitiveParameter] array $data): LuantiServer
     {
         Gate::forUser($this->access->currentUser($actor))->authorize('create', LuantiServer::class);
@@ -29,7 +39,7 @@ class LuantiServerRegistry
         return LuantiServer::query()->create($this->validate($data));
     }
 
-    /** @param array{name?: mixed, notes?: mixed, ip_address?: mixed, game_port?: mixed, api_base_url?: mixed, api_token?: mixed} $data */
+    /** @param array{name?: mixed, notes?: mixed, domain?: mixed, game_port?: mixed, api_base_url?: mixed, api_token?: mixed} $data */
     public function update(User $actor, LuantiServer $server, #[SensitiveParameter] array $data): void
     {
         Gate::forUser($this->access->currentUser($actor))->authorize('update', $server);
@@ -54,15 +64,18 @@ class LuantiServerRegistry
     }
 
     /**
-     * @param  array{name?: mixed, notes?: mixed, ip_address?: mixed, game_port?: mixed, api_base_url?: mixed, api_token?: mixed}  $data
-     * @return array{name: string, notes: ?string, ip_address: string, game_port: int|string, api_base_url: ?string, api_token: ?string}
+     * @param  array{name?: mixed, notes?: mixed, domain?: mixed, game_port?: mixed, api_base_url?: mixed, api_token?: mixed}  $data
+     * @return array{name: string, notes: ?string, domain: string, game_port: int|string, api_base_url: ?string, api_token: ?string}
      */
     private function validate(#[SensitiveParameter] array $data): array
     {
-        foreach (['name', 'notes', 'ip_address', 'api_base_url'] as $field) {
+        foreach (['name', 'notes', 'domain', 'api_base_url'] as $field) {
             if (is_string($data[$field] ?? null)) {
                 $data[$field] = trim($data[$field]);
             }
+        }
+        if (is_string($data['domain'] ?? null)) {
+            $data['domain'] = strtolower($data['domain']);
         }
         foreach (['notes', 'api_base_url', 'api_token'] as $field) {
             if (! isset($data[$field]) || (is_string($data[$field]) && blank($data[$field]))) {
@@ -73,12 +86,12 @@ class LuantiServerRegistry
         return Validator::make($data, [
             'name' => ['required', 'string', 'max:255'],
             'notes' => ['nullable', 'string'],
-            'ip_address' => ['required', 'string', 'ip'],
+            'domain' => self::domainRules(),
             'game_port' => ['required', 'integer', 'between:1,65535'],
             'api_base_url' => ['nullable', 'string', 'max:2048', 'url:https'],
             'api_token' => ['nullable', 'string'],
         ], [], [
-            'name' => 'Name', 'notes' => 'Notizen', 'ip_address' => 'IP-Adresse',
+            'name' => 'Name', 'notes' => 'Notizen', 'domain' => 'Domain',
             'game_port' => 'Spiel-Port', 'api_base_url' => 'HTTPS-API-URL', 'api_token' => 'API-Token',
         ])->validate();
     }
