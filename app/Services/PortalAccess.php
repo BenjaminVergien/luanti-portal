@@ -11,7 +11,10 @@ use App\Models\JoinRequest;
 use App\Models\Organization;
 use App\Models\OrganizationMembership;
 use App\Models\User;
+use Illuminate\Cache\RateLimiter;
+use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Mail;
@@ -138,11 +141,50 @@ class PortalAccess
         $email = Str::lower(trim($email));
         Validator::make(['email' => $email], ['email' => ['required', 'email', 'max:255']])->validate();
         $token = Str::random(64);
-        $invitation = Invitation::query()->create([
-            'email' => $email, 'organization_id' => $organization?->id, 'membership_role' => $membershipRole,
-            'internal_role' => $internalRole, 'invited_by' => $actor->id,
-            'token_hash' => hash('sha256', $token), 'expires_at' => now()->addDays(7),
-        ]);
+        $cache = Cache::store(config('invitations.cache_store'));
+        $invitation = $cache->lock('portal:invitations:issue', 30)->get(function () use ($cache, $actor, $email, $organization, $membershipRole, $internalRole, $token): Invitation {
+            return DB::transaction(function () use ($cache, $actor, $email, $organization, $membershipRole, $internalRole, $token): Invitation {
+                if ($organization !== null) {
+                    Organization::query()->whereKey($organization->id)->lockForUpdate()->firstOrFail();
+                }
+                $actor = $this->currentUser($actor);
+                Gate::forUser($actor)->authorize('create', [Invitation::class, $organization, $membershipRole, $internalRole]);
+
+                $duplicate = Invitation::query()->where('email', $email)->where('organization_id', $organization?->id)
+                    ->where('membership_role', $membershipRole)->where('internal_role', $internalRole)
+                    ->whereNull('accepted_at')->whereNull('revoked_at')->where('expires_at', '>', now())->exists();
+                if ($duplicate) {
+                    throw ValidationException::withMessages(['email' => 'Für diese E-Mail-Adresse besteht bereits eine offene Einladung '.($organization === null ? 'für diese interne Rolle.' : 'für diese Einrichtung und Rolle.')]);
+                }
+
+                $limiter = new RateLimiter($cache);
+                $limits = $this->invitationLimits($actor, $email, $organization);
+                $wait = 0;
+                foreach ($limits as $limit) {
+                    if ($limiter->tooManyAttempts($limit->key, $limit->maxAttempts)) {
+                        $wait = max($wait, 1, $limiter->availableIn($limit->key));
+                    }
+                }
+                if ($wait > 0) {
+                    $minutes = (int) ceil($wait / 60);
+                    throw ValidationException::withMessages(['email' => 'Das Versandlimit für Einladungen ist erreicht. Bitte in '.$minutes.($minutes === 1 ? ' Minute' : ' Minuten').' erneut versuchen.']);
+                }
+
+                foreach ($limits as $limit) {
+                    $limiter->hit($limit->key, $limit->decaySeconds);
+                }
+
+                return Invitation::query()->create([
+                    'email' => $email, 'organization_id' => $organization?->id, 'membership_role' => $membershipRole,
+                    'internal_role' => $internalRole, 'invited_by' => $actor->id,
+                    'token_hash' => hash('sha256', $token), 'expires_at' => now()->addDays(7),
+                ]);
+            });
+        });
+        if ($invitation === false) {
+            throw ValidationException::withMessages(['email' => 'Der Einladungsversand ist gerade ausgelastet. Bitte in wenigen Sekunden erneut versuchen.']);
+        }
+
         try {
             Mail::to($email)->send(new PortalInvitation($invitation, route('invitations.open', ['token' => $token])));
         } catch (\Throwable $exception) {
@@ -151,6 +193,26 @@ class PortalAccess
         }
 
         return $invitation;
+    }
+
+    /** @return list<Limit> */
+    private function invitationLimits(User $actor, string $email, ?Organization $organization): array
+    {
+        $prefix = 'portal:invitations:';
+        $recipient = hash('sha256', $email);
+        $limits = [
+            Limit::perMinute(max(1, config('invitations.limits.actor_per_minute')))->by($prefix.'actor:'.$actor->id.':minute'),
+            Limit::perHour(max(1, config('invitations.limits.actor_per_hour')))->by($prefix.'actor:'.$actor->id.':hour'),
+            Limit::perHour(max(1, config('invitations.limits.recipient_per_hour')))->by($prefix.'recipient:'.$recipient.':hour'),
+            Limit::perDay(max(1, config('invitations.limits.recipient_per_day')))->by($prefix.'recipient:'.$recipient.':day'),
+            Limit::perMinute(max(1, config('invitations.limits.global_per_minute')))->by($prefix.'global:minute'),
+            Limit::perHour(max(1, config('invitations.limits.global_per_hour')))->by($prefix.'global:hour'),
+        ];
+        if ($organization !== null) {
+            $limits[] = Limit::perHour(max(1, config('invitations.limits.organization_per_hour')))->by($prefix.'organization:'.$organization->id.':hour');
+        }
+
+        return $limits;
     }
 
     public function revokeInvitation(User $actor, Invitation $invitation): void

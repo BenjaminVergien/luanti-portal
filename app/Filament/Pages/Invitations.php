@@ -9,9 +9,11 @@ use App\Services\PortalAccess;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
+use Filament\Schemas\Schema;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\ValidationException;
 
 class Invitations extends AccessTablePage
 {
@@ -24,17 +26,30 @@ class Invitations extends AccessTablePage
         return [
             Action::make('invite')->label('Zur Einrichtung einladen')
                 ->schema([$this->organizationField(), TextInput::make('email')->label('E-Mail-Adresse')->email()->required(), $this->membershipRoleField()])
-                ->action(function (array $data): void {
-                    app(PortalAccess::class)->invite($this->actor(), $data['email'], $this->organizationFromData($data), MembershipRole::from($data['membership_role']));
-                    $this->saved('Einladung versendet');
+                ->action(function (array $data, Schema $schema): void {
+                    $this->sendInvitation($schema, fn (): Invitation => app(PortalAccess::class)->invite($this->actor(), $data['email'], $this->organizationFromData($data), MembershipRole::from($data['membership_role'])), 'Einladung versendet');
                 }),
             Action::make('inviteInternal')->label('Interne Rolle einladen')->visible(fn (): bool => $this->isInternalPanel() && $this->actor()->isGlobalAdmin())
                 ->schema([TextInput::make('email')->label('E-Mail-Adresse')->email()->required(), Select::make('internal_role')->label('Interne Rolle')->options(InternalRole::options())->required()])
-                ->action(function (array $data): void {
-                    app(PortalAccess::class)->invite($this->actor(), $data['email'], internalRole: InternalRole::from($data['internal_role']));
-                    $this->saved('Interne Einladung versendet');
+                ->action(function (array $data, Schema $schema): void {
+                    $this->sendInvitation($schema, fn (): Invitation => app(PortalAccess::class)->invite($this->actor(), $data['email'], internalRole: InternalRole::from($data['internal_role'])), 'Interne Einladung versendet');
                 }),
         ];
+    }
+
+    private function sendInvitation(Schema $schema, callable $send, string $successMessage): void
+    {
+        try {
+            $send();
+        } catch (ValidationException $exception) {
+            $errors = [];
+            foreach ($exception->errors() as $field => $messages) {
+                $errors[$schema->getStatePath().'.'.$field] = $messages;
+            }
+            throw ValidationException::withMessages($errors);
+        }
+
+        $this->saved($successMessage);
     }
 
     public function table(Table $table): Table

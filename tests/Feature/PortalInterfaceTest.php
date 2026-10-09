@@ -283,6 +283,37 @@ class PortalInterfaceTest extends TestCase
         Livewire::test(Invitations::class)->assertCanNotSeeTableRecords([$internal])->assertDontSee($internal->email);
     }
 
+    public function test_invitation_form_reports_duplicate_and_limit_errors_without_sending_again(): void
+    {
+        config(['invitations.limits.actor_per_minute' => 1]);
+        $this->panel($this->manager);
+        $page = Livewire::test(Invitations::class);
+        $data = ['email' => 'first@example.test', 'membership_role' => 'staff'];
+        $page->callAction('invite', $data)->assertHasNoActionErrors();
+        $page->callAction('invite', $data)->assertHasActionErrors(['email']);
+        $this->assertStringContainsString('offene Einladung', $page->getMountedActionModalHtml());
+        $page->setActionData(['email' => 'second@example.test', 'membership_role' => 'staff'])
+            ->call('callMountedAction')->assertHasActionErrors(['email']);
+        $this->assertStringContainsString('Versandlimit', $page->getMountedActionModalHtml());
+
+        $this->assertDatabaseCount('invitations', 1);
+        Mail::assertSent(PortalInvitation::class, 1);
+    }
+
+    public function test_internal_invitation_form_reports_limits_without_sending_again(): void
+    {
+        config(['invitations.limits.actor_per_minute' => 1]);
+        $this->panel(User::factory()->globalAdmin()->create(), 'admin');
+        $page = Livewire::test(Invitations::class);
+        $page->callAction('inviteInternal', ['email' => 'first@example.test', 'internal_role' => 'caseworker'])->assertHasNoActionErrors();
+        $page->callAction('inviteInternal', ['email' => 'second@example.test', 'internal_role' => 'global_admin'])
+            ->assertHasActionErrors(['email']);
+        $this->assertStringContainsString('Versandlimit', $page->getMountedActionModalHtml());
+
+        $this->assertDatabaseCount('invitations', 1);
+        Mail::assertSent(PortalInvitation::class, 1);
+    }
+
     public function test_manager_can_rename_only_current_organization(): void
     {
         $this->panel($this->manager);
