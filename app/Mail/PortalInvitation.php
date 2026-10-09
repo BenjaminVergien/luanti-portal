@@ -22,6 +22,6 @@ class PortalInvitation extends Mailable
 
     public function content(): Content
     {
-        return new Content(markdown: 'mail.portal-invitation');
+        return new Content(view: 'mail.portal-invitation', text: 'mail.portal-invitation-text');
     }
 }
