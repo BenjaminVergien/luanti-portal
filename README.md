@@ -2,9 +2,10 @@
 
 Lokale Entwicklungsbasis fuer ein Fachkraefteportal mit Laravel 13 und
 Filament 5. Das Portal soll die Verwaltung von Einrichtungen, Freigaben und
-Luanti-Zugaengen ermoeglichen. Aktuell sind das Filament-Panel, der lokale
-Entwicklungszugang und die grundlegenden Tests eingerichtet. Die Fachfunktionen
-und die Verbindung zur eigenstaendigen Luanti-Bridge folgen noch.
+Luanti-Zugaengen ermoeglichen. Registrierung, E-Mail-Bestaetigung, Einrichtungen,
+Mitgliedschaften, Beitrittsantraege und persoenliche Einladungen sind umgesetzt.
+Serververwaltung, Weltantraege und die Verbindung zur eigenstaendigen
+Luanti-Bridge folgen noch.
 
 ## Bestehende lokale Einrichtung
 
@@ -44,7 +45,36 @@ composer run dev
 
 Der Account verwendet standardmaessig `dev@example.test`. Der Seeder legt ihn
 nur in `APP_ENV=local` an und behaelt das Passwort eines bestehenden Accounts.
-Das produktive Rollen- und Zugriffsmodell ist noch zu entwickeln.
+Der Entwicklungsaccount erhaelt explizit die Globaladminrolle.
+
+## Zugangsverwaltung
+
+- `/admin`: interne Verwaltung fuer Globaladmins und Sachbearbeitung.
+- `/portal/register`: Selbstregistrierung als Fachkraft ohne Mitgliedschaften.
+- `/zugang`: eigene Mitgliedschaften, Einrichtungssuche, Beitrittsantraege und
+  Annahme persoenlicher Einladungen; erfordert eine bestaetigte E-Mail-Adresse.
+- `/portal`: Einrichtungsbereich mit Wechsel zwischen eigenen Einrichtungen.
+
+Globaladmins legen Einrichtungen an, sperren Konten und laden zu internen
+Rollen ein. Sachbearbeitung verwaltet Mitgliedschaften aller Einrichtungen.
+Einrichtungsverwaltungen bearbeiten den Einrichtungsnamen, entscheiden ueber
+Beitrittsantraege und verwalten Fachkraftmitgliedschaften ihrer Einrichtung.
+Verwaltungsmitgliedschaften vergeben nur die internen Rollen.
+
+Einladungen sind sieben Tage gueltig, einmal verwendbar und an die bestaetigte
+E-Mail-Adresse gebunden. Beim Annehmen werden die aktuellen Rechte der
+einladenden Person erneut geprueft. Mitgliedschaften gelten je Einrichtung.
+Das Entfernen einer Mitgliedschaft veraendert andere Einrichtungen nicht.
+
+Den ersten produktiven Globaladmin richtet `php artisan admin:create`
+interaktiv ein. Der Befehl nimmt keine Passwortargumente entgegen und ersetzt
+kein bestehendes Passwort. Sobald ein aktiver Globaladmin existiert, werden
+weitere interne Rollen ausschliesslich per Einladung vergeben.
+
+Lokal schreibt der Mailer Einladungen ins Log. E-Mail-Bestaetigungen laufen
+ueber die Queue; `composer run dev` startet den Worker mit. Vor externer Nutzung
+einen echten Mailtransport und einen dauerhaft laufenden Queue-Worker
+konfigurieren.
 
 ## Pruefen und bauen
 

@@ -19,12 +19,12 @@ class FilamentPanelTest extends TestCase
         $this->get('/admin/login')->assertOk();
     }
 
-    public function test_a_local_user_can_sign_in_and_open_the_dashboard(): void
+    public function test_an_explicit_local_admin_can_sign_in_and_open_the_dashboard(): void
     {
         $this->app->instance('env', 'local');
         config(['app.env' => 'local']);
 
-        $user = User::factory()->create(['password' => 'test-only-password']);
+        $user = User::factory()->globalAdmin()->create(['password' => 'test-only-password']);
 
         Filament::setCurrentPanel(Filament::getPanel('admin'));
         Filament::bootCurrentPanel();

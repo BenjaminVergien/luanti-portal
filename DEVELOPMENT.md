@@ -21,9 +21,11 @@ Mit `Strg+C` werden die Entwicklungsprozesse beendet.
 - Das generierte Passwort steht ausschliesslich in der ignorierten `.env`
   unter `DEV_ADMIN_PASSWORD`.
 
-Filament stellt zunaechst das Standardpanel bereit. Antraege, Freigaben,
-Einrichtungen, Weltverwaltung und die Luanti-Anbindung werden anschliessend
-entwickelt. Es gibt noch kein produktives Rollenmodell.
+Die interne Verwaltung steht unter `/admin`, der Einrichtungsbereich unter
+`/portal`. Fachkraefte registrieren sich unter `/portal/register`; ihre
+Zugangsseite ist `/zugang`. Der lokale Entwicklungsaccount ist Globaladmin.
+Einrichtungen, Mitgliedschaften, Beitrittsantraege und persoenliche Einladungen
+sind eingerichtet. Weltantraege, Serververwaltung und Luanti-Anbindung folgen.
 
 ## Befehle
 
@@ -38,12 +40,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 build
 powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan migrate
 powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 composer check-platform-reqs
 
+# Ersten Globaladmin ausserhalb der lokalen Entwicklung interaktiv anlegen
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan admin:create
+
 # Lokalen Entwicklungsaccount nach einem Datenbank-Neustart wieder anlegen
 powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan db:seed
 ```
 
-Der Seeder erzeugt den Entwicklungsaccount nur in `APP_ENV=local` und
-ueberschreibt kein bestehendes Passwort. `.env.example` enthaelt kein Passwort.
+Der Seeder erzeugt den Entwicklungsaccount nur in `APP_ENV=local`, weist ihm
+die Globaladminrolle zu und ueberschreibt kein bestehendes Passwort.
+`.env.example` enthaelt kein Passwort.
+
+Einladungen und E-Mail-Bestaetigungen gehen lokal an den Log-Mailer; die
+Bestaetigungen werden vom Queue-Worker verarbeitet. Einladungslinks im Log
+sind persoenliche Testzugangslinks. Einladungen laufen nach sieben Tagen ab.
 
 ## Lokale Konfiguration
 
@@ -57,9 +67,11 @@ ueberschreibt kein bestehendes Passwort. `.env.example` enthaelt kein Passwort.
 und Build-Ausgaben gehoeren nicht ins Repository. Die Lockdateien gehoeren
 zum Quellcode. Die vorhandene SSH-Bridge ist ein eigenstaendiges Projekt.
 
-Vor einem spaeteren Deployment braucht das Portal insbesondere explizite
-Zugriffsregeln fuer Fachkraefte, Einrichtungen und Administration. Die aktuelle
-Einrichtung ist eine lokale Entwicklungsbasis.
+Vor einem Deployment einen echten Mailtransport, HTTPS, einen stabilen
+Anwendungsschluessel und einen dauerhaft laufenden Queue-Worker konfigurieren.
+Der erste produktive Globaladmin wird ueber `admin:create` angelegt. Die
+Zugriffsregeln gelten in allen Umgebungen, auch lokal; es gibt keinen
+allgemeinen lokalen Adminzugriff mehr.
 
 ## Eigenes Git-Repository
 

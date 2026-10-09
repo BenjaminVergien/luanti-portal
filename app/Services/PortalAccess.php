@@ -1,0 +1,229 @@
+<?php
+
+namespace App\Services;
+
+use App\Enums\InternalRole;
+use App\Enums\JoinRequestStatus;
+use App\Enums\MembershipRole;
+use App\Mail\PortalInvitation;
+use App\Models\Invitation;
+use App\Models\JoinRequest;
+use App\Models\Organization;
+use App\Models\OrganizationMembership;
+use App\Models\User;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+
+class PortalAccess
+{
+    public function currentUser(User $user): User
+    {
+        $current = User::query()->when(DB::transactionLevel() > 0, fn (Builder $query): Builder => $query->lockForUpdate())->findOrFail($user->id);
+        abort_unless($current->is_active && $current->hasVerifiedEmail(), 403);
+
+        return $current;
+    }
+
+    public function createOrganization(User $actor, string $name): Organization
+    {
+        Gate::forUser($this->currentUser($actor))->authorize('create', Organization::class);
+
+        return Organization::query()->create($this->validateName($name));
+    }
+
+    public function renameOrganization(User $actor, Organization $organization, string $name): void
+    {
+        Gate::forUser($this->currentUser($actor))->authorize('update', $organization);
+        $organization->update($this->validateName($name));
+    }
+
+    private function validateName(string $name): array
+    {
+        return Validator::make(['name' => trim($name)], ['name' => ['required', 'string', 'max:255']])->validate();
+    }
+
+    public function assignMembership(User $actor, Organization $organization, User $target, MembershipRole $role): OrganizationMembership
+    {
+        return DB::transaction(function () use ($actor, $organization, $target, $role): OrganizationMembership {
+            Organization::query()->whereKey($organization->id)->lockForUpdate()->firstOrFail();
+            $actor = $this->currentUser($actor);
+            Gate::forUser($actor)->authorize('assign', [OrganizationMembership::class, $organization, $role]);
+            $target = $this->currentUser($target);
+            $existing = OrganizationMembership::query()->where('organization_id', $organization->id)->where('user_id', $target->id)->first();
+            if ($existing !== null) {
+                Gate::forUser($actor)->authorize('update', $existing);
+            }
+
+            $membership = OrganizationMembership::query()->updateOrCreate(['organization_id' => $organization->id, 'user_id' => $target->id], ['role' => $role]);
+            JoinRequest::query()->where('organization_id', $organization->id)->where('user_id', $target->id)->where('status', JoinRequestStatus::Pending)
+                ->update(['status' => JoinRequestStatus::Approved->value, 'decided_by' => $actor->id, 'decided_at' => now()]);
+
+            return $membership;
+        });
+    }
+
+    public function assignByEmail(User $actor, Organization $organization, string $email, MembershipRole $role): OrganizationMembership
+    {
+        Gate::forUser($this->currentUser($actor))->authorize('assign', [OrganizationMembership::class, $organization, $role]);
+        $target = User::query()->where('email', Str::lower(trim($email)))->first();
+        if ($target === null || ! $target->is_active || ! $target->hasVerifiedEmail()) {
+            throw ValidationException::withMessages(['email' => 'Ein aktives Konto mit bestätigter E-Mail-Adresse ist erforderlich. Alternativ eine Einladung senden.']);
+        }
+
+        return $this->assignMembership($actor, $organization, $target, $role);
+    }
+
+    public function removeMembership(User $actor, OrganizationMembership $membership): void
+    {
+        DB::transaction(function () use ($actor, $membership): void {
+            Organization::query()->whereKey($membership->organization_id)->lockForUpdate()->firstOrFail();
+            $membership = OrganizationMembership::query()->findOrFail($membership->id);
+            Gate::forUser($this->currentUser($actor))->authorize('delete', $membership);
+            $membership->delete();
+        });
+    }
+
+    public function requestMembership(User $actor, Organization $organization): JoinRequest
+    {
+        return DB::transaction(function () use ($actor, $organization): JoinRequest {
+            Organization::query()->whereKey($organization->id)->lockForUpdate()->firstOrFail();
+            $actor = $this->currentUser($actor);
+            Gate::forUser($actor)->authorize('create', JoinRequest::class);
+            if ($actor->memberships()->where('organization_id', $organization->id)->exists()) {
+                throw ValidationException::withMessages(['organization' => 'Du bist bereits Mitglied dieser Einrichtung.']);
+            }
+            if (JoinRequest::query()->where('organization_id', $organization->id)->where('user_id', $actor->id)->where('status', JoinRequestStatus::Pending)->exists()) {
+                throw ValidationException::withMessages(['organization' => 'Für diese Einrichtung besteht bereits ein offener Antrag.']);
+            }
+
+            return JoinRequest::query()->create(['organization_id' => $organization->id, 'user_id' => $actor->id, 'status' => JoinRequestStatus::Pending]);
+        });
+    }
+
+    public function decideRequest(User $actor, JoinRequest $joinRequest, bool $approve): void
+    {
+        DB::transaction(function () use ($actor, $joinRequest, $approve): void {
+            Organization::query()->whereKey($joinRequest->organization_id)->lockForUpdate()->firstOrFail();
+            $joinRequest = JoinRequest::query()->lockForUpdate()->findOrFail($joinRequest->id);
+            $actor = $this->currentUser($actor);
+            Gate::forUser($actor)->authorize('decide', $joinRequest);
+            if ($approve) {
+                $target = $this->currentUser($joinRequest->user);
+                OrganizationMembership::query()->firstOrCreate(
+                    ['organization_id' => $joinRequest->organization_id, 'user_id' => $target->id], ['role' => MembershipRole::Staff]);
+            }
+            $joinRequest->update(['status' => $approve ? JoinRequestStatus::Approved : JoinRequestStatus::Rejected, 'decided_by' => $actor->id, 'decided_at' => now()]);
+        });
+    }
+
+    public function cancelRequest(User $actor, JoinRequest $joinRequest): void
+    {
+        DB::transaction(function () use ($actor, $joinRequest): void {
+            $joinRequest = JoinRequest::query()->lockForUpdate()->findOrFail($joinRequest->id);
+            $actor = $this->currentUser($actor);
+            Gate::forUser($actor)->authorize('cancel', $joinRequest);
+            $joinRequest->update(['status' => JoinRequestStatus::Cancelled, 'decided_by' => $actor->id, 'decided_at' => now()]);
+        });
+    }
+
+    public function invite(User $actor, string $email, ?Organization $organization = null, ?MembershipRole $membershipRole = null, ?InternalRole $internalRole = null): Invitation
+    {
+        $actor = $this->currentUser($actor);
+        Gate::forUser($actor)->authorize('create', [Invitation::class, $organization, $membershipRole, $internalRole]);
+        $email = Str::lower(trim($email));
+        Validator::make(['email' => $email], ['email' => ['required', 'email', 'max:255']])->validate();
+        $token = Str::random(64);
+        $invitation = Invitation::query()->create([
+            'email' => $email, 'organization_id' => $organization?->id, 'membership_role' => $membershipRole,
+            'internal_role' => $internalRole, 'invited_by' => $actor->id,
+            'token_hash' => hash('sha256', $token), 'expires_at' => now()->addDays(7),
+        ]);
+        try {
+            Mail::to($email)->send(new PortalInvitation($invitation, route('invitations.open', ['token' => $token])));
+        } catch (\Throwable $exception) {
+            $invitation->update(['revoked_at' => now()]);
+            throw $exception;
+        }
+
+        return $invitation;
+    }
+
+    public function revokeInvitation(User $actor, Invitation $invitation): void
+    {
+        DB::transaction(function () use ($actor, $invitation): void {
+            $invitation = Invitation::query()->lockForUpdate()->findOrFail($invitation->id);
+            Gate::forUser($this->currentUser($actor))->authorize('revoke', $invitation);
+            $invitation->update(['revoked_at' => now()]);
+        });
+    }
+
+    public function acceptInvitation(User $actor, #[\SensitiveParameter] string $token): Invitation
+    {
+        return $this->acceptInvitationHash($actor, hash('sha256', $token));
+    }
+
+    public function acceptInvitationHash(User $actor, string $tokenHash): Invitation
+    {
+        return DB::transaction(function () use ($actor, $tokenHash): Invitation {
+            $invitation = Invitation::query()->where('token_hash', $tokenHash)->first();
+            if ($invitation?->organization_id !== null) {
+                Organization::query()->whereKey($invitation->organization_id)->lockForUpdate()->firstOrFail();
+            }
+            $invitation = Invitation::query()->where('token_hash', $tokenHash)->lockForUpdate()->first();
+            if ($invitation === null || ! $invitation->isPending()) {
+                throw ValidationException::withMessages(['invitation' => 'Diese Einladung ist ungültig, abgelaufen oder bereits erledigt.']);
+            }
+            $actor = $this->currentUser($actor);
+            if (Str::lower($actor->email) !== $invitation->email) {
+                throw ValidationException::withMessages(['invitation' => 'Bitte mit dem Konto der eingeladenen E-Mail-Adresse anmelden.']);
+            }
+            $inviter = $this->currentUser($invitation->inviter);
+            Gate::forUser($inviter)->authorize('create', [Invitation::class, $invitation->organization, $invitation->membership_role, $invitation->internal_role]);
+            if ($invitation->organization_id !== null) {
+                $membership = OrganizationMembership::query()->firstOrCreate(
+                    ['organization_id' => $invitation->organization_id, 'user_id' => $actor->id], ['role' => $invitation->membership_role]);
+                if ($membership->role === MembershipRole::Staff && $invitation->membership_role === MembershipRole::Manager) {
+                    $membership->update(['role' => MembershipRole::Manager]);
+                }
+                JoinRequest::query()->where('organization_id', $invitation->organization_id)->where('user_id', $actor->id)->where('status', JoinRequestStatus::Pending)
+                    ->update(['status' => JoinRequestStatus::Approved->value, 'decided_by' => $inviter->id, 'decided_at' => now()]);
+            } else {
+                $actor = User::query()->lockForUpdate()->findOrFail($actor->id);
+                if ($actor->internal_role !== InternalRole::GlobalAdmin) {
+                    $actor->forceFill(['internal_role' => $invitation->internal_role])->save();
+                }
+            }
+            $invitation->update(['accepted_at' => now(), 'accepted_by' => $actor->id]);
+
+            return $invitation;
+        });
+    }
+
+    public function updateAccount(User $actor, User $target, ?InternalRole $role, bool $active): void
+    {
+        DB::transaction(function () use ($actor, $target, $role, $active): void {
+            $admins = User::query()->where('internal_role', InternalRole::GlobalAdmin)->orderBy('id')->lockForUpdate()->get();
+            $actor = $this->currentUser($actor);
+            $target = User::query()->lockForUpdate()->findOrFail($target->id);
+            Gate::forUser($actor)->authorize('update', $target);
+            if ($role !== null && ! $target->hasVerifiedEmail()) {
+                throw ValidationException::withMessages(['internal_role' => 'Interne Rollen benötigen eine bestätigte E-Mail-Adresse.']);
+            }
+            if ($target->isGlobalAdmin() && (! $active || $role !== InternalRole::GlobalAdmin) && $admins->filter(fn (User $admin): bool => $admin->isGlobalAdmin())->count() <= 1) {
+                throw ValidationException::withMessages(['internal_role' => 'Der letzte aktive Globaladmin muss erhalten bleiben.']);
+            }
+            if ($target->internal_role === null && $role !== null) {
+                throw ValidationException::withMessages(['internal_role' => 'Neue interne Rollen werden per Einladung vergeben.']);
+            }
+            if ($target->internal_role === InternalRole::Caseworker && $role === InternalRole::GlobalAdmin) {
+                throw ValidationException::withMessages(['internal_role' => 'Die Globaladminrolle wird per Einladung vergeben.']);
+            }
+            $target->forceFill(['internal_role' => $role, 'is_active' => $active])->save();
+        });
+    }
+}

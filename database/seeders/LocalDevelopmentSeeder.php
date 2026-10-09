@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use App\Enums\InternalRole;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 use RuntimeException;
@@ -20,7 +21,7 @@ class LocalDevelopmentSeeder extends Seeder
             throw new RuntimeException('Set DEV_ADMIN_PASSWORD in the local .env (at least 16 characters).');
         }
 
-        User::firstOrCreate(
+        $user = User::firstOrCreate(
             ['email' => config('development.admin_email')],
             [
                 'name' => 'Lokale Entwicklung',
@@ -28,5 +29,6 @@ class LocalDevelopmentSeeder extends Seeder
                 'email_verified_at' => now(),
             ],
         );
+        $user->forceFill(['is_active' => true, 'internal_role' => InternalRole::GlobalAdmin])->save();
     }
 }
