@@ -23,6 +23,16 @@ class OrganizationPolicy
         return $user->isGlobalAdmin();
     }
 
+    public function createForSelf(User $user): bool
+    {
+        return $user->is_active && $user->hasVerifiedEmail();
+    }
+
+    public function verify(User $user, Organization $organization): bool
+    {
+        return $user->isInternal();
+    }
+
     public function update(User $user, Organization $organization): bool
     {
         return $user->isGlobalAdmin() || ($user->is_active && $user->hasVerifiedEmail()

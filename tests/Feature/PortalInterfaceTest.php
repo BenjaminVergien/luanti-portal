@@ -27,6 +27,7 @@ use Filament\Facades\Filament;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\HtmlString;
 use Livewire\Livewire;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -126,6 +127,131 @@ class PortalInterfaceTest extends TestCase
             ->call('requestJoin', $this->organization->id)->assertHasNoErrors()
             ->assertSee('Dein Beitrittsantrag wurde eingereicht.');
         $this->assertSame(0, $outsider->memberships()->count());
+    }
+
+    public static function organizationSearches(): array
+    {
+        return [
+            'empty' => ['', false],
+            'whitespace' => ['   ', false],
+            'exact' => ['Einrichtung A', false],
+            'case and surrounding spaces' => [' EINRICHTUNG a ', false],
+            'similar results' => ['Einrichtung', true],
+            'no results' => ['Jugendtreff Süd', true],
+            'long name' => [str_repeat('ü', 255), true],
+        ];
+    }
+
+    #[DataProvider('organizationSearches')]
+    public function test_search_offers_creation_only_without_an_exact_match(string $search, bool $canCreate): void
+    {
+        $this->actingAs(User::factory()->create());
+        $page = Livewire::test(AccessPage::class)->set('search', $search)
+            ->assertViewHas('canCreateOrganization', $canCreate)
+            ->assertSee('Das Luanti-Portal richtet sich an Fachkräfte der Jugendarbeit.')
+            ->assertSee('Wenn du freiberuflich arbeitest');
+
+        if ($canCreate) {
+            $page->assertSee('Einrichtung „'.trim($search).'“ erstellen');
+        } else {
+            $page->assertDontSee('wire:click="createOrganization"', false);
+        }
+
+        if ($search === 'Einrichtung') {
+            $page->assertSee('Einrichtung A')->assertSee('Beitritt beantragen');
+        }
+
+        $this->capturePreview('onboarding-'.(trim($search) === '' ? 'empty' : (mb_strlen($search) === 255 ? 'long-name' : ($canCreate ? 'create' : 'match'))),
+            view('components.layouts.access', ['slot' => new HtmlString($page->html())])->render());
+    }
+
+    public function test_exact_name_check_handles_german_case_outside_the_result_limit(): void
+    {
+        Organization::factory()->create(['name' => ' Jugendtreff Süd ']);
+        for ($index = 0; $index < 21; $index++) {
+            Organization::factory()->create(['name' => '0 Einrichtung A '.$index]);
+        }
+        $this->actingAs(User::factory()->create());
+        Livewire::test(AccessPage::class)->set('search', 'JUGENDTREFF SÜD')->assertViewHas('canCreateOrganization', false)
+            ->set('search', 'Einrichtung A')->assertViewHas('organizations', fn ($organizations): bool => $organizations->count() === 20 && ! $organizations->contains('id', $this->organization->id))
+            ->assertViewHas('canCreateOrganization', false);
+    }
+
+    public function test_search_creation_opens_the_new_organization_as_manager(): void
+    {
+        $this->actingAs($this->staff);
+        $page = Livewire::test(AccessPage::class)->set('search', ' Jugendtreff Süd ')
+            ->call('createOrganization')->assertHasNoErrors();
+        $organization = Organization::query()->where('name', 'Jugendtreff Süd')->sole();
+        $page->assertRedirect(route('filament.portal.pages.organization-home', ['tenant' => $organization->id]));
+        $this->assertSame(MembershipRole::Manager, $this->staff->memberships()->where('organization_id', $organization->id)->sole()->role);
+        $this->assertSame(MembershipRole::Staff, $this->staff->memberships()->where('organization_id', $this->organization->id)->sole()->role);
+        $this->get(route('filament.portal.pages.organization-home', ['tenant' => $organization->id]))->assertOk()->assertSee('Jugendtreff Süd');
+        $this->assertNull($this->staff->fresh()->internal_role);
+    }
+
+    public function test_creation_rechecks_a_match_added_after_search(): void
+    {
+        $this->actingAs($this->staff);
+        $page = Livewire::test(AccessPage::class)->set('search', 'Jugendtreff Süd')->assertViewHas('canCreateOrganization', true);
+        $organization = Organization::factory()->create(['name' => 'JUGENDTREFF SÜD']);
+        $page->call('createOrganization')->assertHasErrors(['name'])->assertNoRedirect();
+        $this->assertDatabaseCount('organizations', 3);
+        $this->assertFalse($this->staff->memberships()->where('organization_id', $organization->id)->exists());
+    }
+
+    public static function rejectedOrganizationSearches(): array
+    {
+        return ['empty' => [''], 'whitespace' => ['   '], 'exact' => ['Einrichtung A'], 'case variant' => [' EINRICHTUNG a ']];
+    }
+
+    #[DataProvider('rejectedOrganizationSearches')]
+    public function test_creation_rejects_blank_or_matching_searches(string $search): void
+    {
+        $this->actingAs($this->staff);
+        Livewire::test(AccessPage::class)->set('search', $search)->call('createOrganization')
+            ->assertHasErrors([trim($search) === '' ? 'search' : 'name'])->assertNoRedirect();
+        $this->assertDatabaseCount('organizations', 2);
+        $this->assertSame(1, $this->staff->memberships()->count());
+    }
+
+    public function test_creation_rejects_an_overlong_search(): void
+    {
+        $this->actingAs($this->staff);
+        Livewire::test(AccessPage::class)->set('search', str_repeat('ü', 256))->call('createOrganization')
+            ->assertHasErrors(['search' => 'max'])->assertNoRedirect();
+        $this->assertDatabaseCount('organizations', 2);
+    }
+
+    public static function restrictedAccountChanges(): array
+    {
+        return ['inactive' => [['is_active' => false]], 'unverified' => [['email_verified_at' => null]]];
+    }
+
+    /** @param array{is_active?: bool, email_verified_at?: null} $changes */
+    #[DataProvider('restrictedAccountChanges')]
+    public function test_creation_rejects_accounts_restricted_after_mount(array $changes): void
+    {
+        $this->actingAs($this->staff);
+        $page = Livewire::test(AccessPage::class)->set('search', 'Neue Einrichtung');
+        User::query()->whereKey($this->staff->id)->update($changes);
+        $page->call('createOrganization')->assertForbidden();
+        $this->assertDatabaseCount('organizations', 2);
+        $this->assertSame(1, $this->staff->memberships()->count());
+    }
+
+    public function test_creation_limits_attempts_per_user_without_affecting_other_users(): void
+    {
+        $this->actingAs($this->staff);
+        $page = Livewire::test(AccessPage::class)->set('search', 'Einrichtung A');
+        for ($attempt = 0; $attempt < 10; $attempt++) {
+            $page->call('createOrganization')->assertHasErrors(['name']);
+        }
+        $page->set('search', 'Neue Einrichtung')->call('createOrganization')->assertStatus(429);
+        $this->assertDatabaseCount('organizations', 2);
+        $this->actingAs(User::factory()->create());
+        Livewire::test(AccessPage::class)->set('search', 'Neue Einrichtung')->call('createOrganization')->assertHasNoErrors();
+        $this->assertDatabaseCount('organizations', 3);
     }
 
     public function test_access_page_cannot_cancel_another_users_request(): void
@@ -261,6 +387,30 @@ class PortalInterfaceTest extends TestCase
         $this->assertDatabaseHas('organization_memberships', ['organization_id' => $this->other->id, 'user_id' => $target->id, 'role' => 'manager']);
     }
 
+    public static function organizationVerifiers(): array
+    {
+        return ['global admin' => [true], 'caseworker' => [false]];
+    }
+
+    #[DataProvider('organizationVerifiers')]
+    public function test_internal_organization_list_can_verify_and_displays_persisted_verification(bool $isGlobalAdmin): void
+    {
+        $actor = $isGlobalAdmin ? User::factory()->globalAdmin()->create() : User::factory()->caseworker()->create();
+        $this->panel($actor, 'admin');
+        Livewire::test(Organizations::class)->assertSee('Nicht verifiziert')
+            ->assertActionVisible(TestAction::make('verify')->table($this->organization))
+            ->callAction(TestAction::make('verify')->table($this->organization))->assertHasNoActionErrors()
+            ->assertNotified('Einrichtung verifiziert');
+
+        $this->assertNotNull($this->organization->fresh()->verified_at);
+        $this->assertSame($actor->id, $this->organization->fresh()->verified_by);
+        Livewire::test(Organizations::class)->assertTableColumnStateSet('verified_at', $this->organization->fresh()->verified_at, $this->organization)
+            ->assertTableColumnStateSet('verifiedBy.name', $actor->name, $this->organization)
+            ->assertActionHidden(TestAction::make('verify')->table($this->organization))
+            ->assertActionVisible(TestAction::make('verify')->table($this->other));
+        $this->capturePreview('organization-verification', $this->get('/admin/einrichtungen')->assertOk()->assertSee('Verifiziert am')->assertSee('Verifiziert durch')->getContent());
+    }
+
     public function test_requests_and_invitations_are_tenant_scoped(): void
     {
         $ownRequest = JoinRequest::factory()->create(['organization_id' => $this->organization->id]);
@@ -383,14 +533,19 @@ class PortalInterfaceTest extends TestCase
         if ($role === 'caseworker') {
             $response->assertDontSee('href="'.route('filament.admin.pages.konten').'"', false);
         }
+        $this->capturePreview($role, $response->getContent());
+    }
+
+    private function capturePreview(string $name, string $html): void
+    {
         if (env('PORTAL_CAPTURE_PREVIEWS', false)) {
             $directory = storage_path('app/qa');
             if (! is_dir($directory)) {
                 mkdir($directory, 0755, true);
             }
-            $html = str_replace('http://localhost/', 'http://127.0.0.1:8000/', $response->getContent());
+            $html = str_replace('http://localhost/', 'http://127.0.0.1:8000/', $html);
             $html = str_replace('<head>', '<head><base href="http://127.0.0.1:8000/">', $html);
-            file_put_contents($directory.'/'.$role.'.html', $html);
+            file_put_contents($directory.'/'.$name.'.html', $html);
         }
     }
 }

@@ -33,9 +33,11 @@ class Organizations extends AccessTablePage
 
     public function table(Table $table): Table
     {
-        return $table->query(Organization::query())->columns([
+        return $table->query(Organization::query()->with('verifiedBy'))->columns([
             TextColumn::make('name')->label('Name')->searchable()->sortable(),
             TextColumn::make('memberships_count')->counts('memberships')->label('Mitgliedschaften'),
+            TextColumn::make('verified_at')->label('Verifiziert am')->dateTime('d.m.Y H:i')->placeholder('Nicht verifiziert')->sortable(),
+            TextColumn::make('verifiedBy.name')->label('Verifiziert durch')->placeholder('–'),
         ])->recordActions([
             Action::make('rename')->label('Bearbeiten')->visible(fn (Organization $record): bool => Gate::forUser($this->actor())->allows('update', $record))
                 ->fillForm(fn (Organization $record): array => ['name' => $record->name])
@@ -43,6 +45,12 @@ class Organizations extends AccessTablePage
                 ->action(function (Organization $record, array $data): void {
                     app(PortalAccess::class)->renameOrganization($this->actor(), $record, $data['name']);
                     $this->saved();
+                }),
+            Action::make('verify')->label('Einrichtung verifizieren')
+                ->visible(fn (Organization $record): bool => $record->verified_at === null && Gate::forUser($this->actor())->allows('verify', $record))
+                ->action(function (Organization $record): void {
+                    app(PortalAccess::class)->verifyOrganization($this->actor(), $record);
+                    $this->saved('Einrichtung verifiziert');
                 }),
         ])->emptyStateHeading('Noch keine Einrichtungen');
     }

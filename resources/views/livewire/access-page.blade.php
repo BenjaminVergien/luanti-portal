@@ -34,21 +34,28 @@
                 <a class="rounded-lg bg-amber-600 px-4 py-2 font-medium text-white" href="{{ route('filament.portal.pages.organization-home', ['tenant' => $membership->organization_id]) }}">Einrichtung öffnen</a>
             </div>
         @empty
-            <p class="mt-3 text-stone-600">Du bist noch keiner Einrichtung zugeordnet. Stelle einen Beitrittsantrag oder öffne eine persönliche Einladung.</p>
+            <p class="mt-3 text-stone-600">Du bist noch keiner Einrichtung zugeordnet. Stelle einen Beitrittsantrag, erstelle eine neue Einrichtung oder öffne eine persönliche Einladung.</p>
         @endforelse
     </section>
 
     <section class="rounded-xl border border-stone-200 bg-white p-6">
         <h2 class="text-xl font-semibold">Einrichtung finden</h2>
+        <p class="mt-3 text-stone-600">Das Luanti-Portal richtet sich an Fachkräfte der Jugendarbeit. Deine Zugänge werden über eine Einrichtung organisiert. Wenn du freiberuflich arbeitest, kannst du einfach deinen eigenen Namen als Einrichtung verwenden.</p>
         <label for="organization-search" class="mt-3 block text-sm text-stone-600">Name der Einrichtung</label>
         <input id="organization-search" type="search" maxlength="255" wire:model.live.debounce.300ms="search" class="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2" placeholder="Einrichtungsnamen eingeben">
         @foreach($organizations as $organization)
-            <div class="mt-3 flex items-center justify-between gap-3" wire:key="organization-{{ $organization->id }}">
-                <span>{{ $organization->name }}</span>
+            <div class="mt-3 flex flex-wrap items-center justify-between gap-3" wire:key="organization-{{ $organization->id }}">
+                <span class="min-w-0 break-words">{{ $organization->name }}</span>
                 <button wire:click="requestJoin({{ $organization->id }})" wire:loading.attr="disabled" class="rounded-lg border border-stone-300 px-3 py-2 text-sm">Beitritt beantragen</button>
             </div>
         @endforeach
         @if(trim($search) !== '' && $organizations->isEmpty())<p class="mt-3 text-stone-600">Keine Einrichtung gefunden.</p>@endif
+        @if($canCreateOrganization)
+            <div class="mt-4 border-t border-stone-100 pt-4">
+                <p class="text-stone-600">Deine Einrichtung ist noch nicht dabei? Erstelle sie hier. Du erhältst dafür die Einrichtungsleitung und kannst weitere Fachkräfte einladen.</p>
+                <button wire:click="createOrganization" wire:loading.attr="disabled" class="mt-3 max-w-full break-words rounded-lg bg-amber-600 px-4 py-2 font-medium text-white disabled:opacity-50">Einrichtung „{{ trim($search) }}“ erstellen</button>
+            </div>
+        @endif
     </section>
 
     <section class="rounded-xl border border-stone-200 bg-white p-6">

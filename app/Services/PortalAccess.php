@@ -40,12 +40,64 @@ class PortalAccess
         return Organization::query()->create($this->validateName($name));
     }
 
+    public function createOrganizationForSelf(User $actor, string $name): Organization
+    {
+        Gate::forUser($this->currentUser($actor))->authorize('createForSelf', Organization::class);
+        $data = $this->validateName($name);
+        $lockKey = 'portal:organizations:create:'.hash('sha256', mb_strtolower($data['name']));
+
+        $organization = Cache::lock($lockKey, 30)->get(function () use ($actor, $data): Organization {
+            return DB::transaction(function () use ($actor, $data): Organization {
+                $actor = $this->currentUser($actor);
+                Gate::forUser($actor)->authorize('createForSelf', Organization::class);
+
+                if ($this->organizationNameExists($data['name'])) {
+                    throw ValidationException::withMessages(['name' => 'Eine Einrichtung mit diesem Namen besteht bereits. Bitte beantrage den Beitritt.']);
+                }
+
+                $organization = Organization::query()->create($data);
+                $organization->memberships()->create(['user_id' => $actor->id, 'role' => MembershipRole::Manager]);
+
+                return $organization;
+            });
+        });
+
+        if (! $organization instanceof Organization) {
+            throw ValidationException::withMessages(['name' => 'Die Einrichtung wird gerade erstellt. Bitte versuche es in wenigen Sekunden erneut.']);
+        }
+
+        return $organization;
+    }
+
+    public function organizationNameExists(string $name): bool
+    {
+        $normalizedName = mb_strtolower(trim($name));
+
+        return Organization::query()->select(['id', 'name'])->lazyById()->contains(
+            fn (Organization $organization): bool => mb_strtolower(trim($organization->name)) === $normalizedName,
+        );
+    }
+
     public function renameOrganization(User $actor, Organization $organization, string $name): void
     {
         Gate::forUser($this->currentUser($actor))->authorize('update', $organization);
         $organization->update($this->validateName($name));
     }
 
+    public function verifyOrganization(User $actor, Organization $organization): void
+    {
+        DB::transaction(function () use ($actor, $organization): void {
+            $organization = Organization::query()->whereKey($organization->id)->lockForUpdate()->firstOrFail();
+            $actor = $this->currentUser($actor);
+            Gate::forUser($actor)->authorize('verify', $organization);
+
+            if ($organization->verified_at === null) {
+                $organization->forceFill(['verified_at' => now(), 'verified_by' => $actor->id])->save();
+            }
+        });
+    }
+
+    /** @return array{name: string} */
     private function validateName(string $name): array
     {
         return Validator::make(['name' => trim($name)], ['name' => ['required', 'string', 'max:255']])->validate();

@@ -15,11 +15,14 @@ use App\Services\PortalAccess;
 use Database\Seeders\LocalDevelopmentSeeder;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Validation\ValidationException;
 use PHPUnit\Framework\Attributes\DataProvider;
+use RuntimeException;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\TestCase;
 
@@ -68,7 +71,9 @@ class PortalAccessTest extends TestCase
     {
         $gate = Gate::forUser($this->{$actorName});
         $this->assertSame($create, $gate->allows('create', Organization::class));
+        $this->assertTrue($gate->allows('createForSelf', Organization::class));
         $this->assertSame($rename, $gate->allows('update', $this->organization));
+        $this->assertSame(in_array($actorName, ['admin', 'caseworker'], true), $gate->allows('verify', $this->organization));
         $this->assertSame($assignManager, $gate->allows('assign', [OrganizationMembership::class, $this->organization, MembershipRole::Manager]));
         $this->assertSame($assignStaff, $gate->allows('assign', [OrganizationMembership::class, $this->organization, MembershipRole::Staff]));
         $this->assertSame($actorName === 'admin', $gate->allows('create', [Invitation::class, null, null, InternalRole::Caseworker]));
@@ -82,10 +87,236 @@ class PortalAccessTest extends TestCase
         $this->assertSame('Geänderter Name', $this->organization->fresh()->name);
     }
 
+    public function test_self_creation_grants_management_and_preserves_existing_access(): void
+    {
+        foreach ([$this->staff, $this->caseworker, User::factory()->create()] as $actor) {
+            $existingMemberships = $actor->memberships()->pluck('role', 'organization_id')->all();
+            $internalRole = $actor->internal_role;
+            $organization = $this->access->createOrganizationForSelf($actor, ' Jugendtreff Süd '.$actor->id.' ');
+
+            $this->assertSame('Jugendtreff Süd '.$actor->id, $organization->name);
+            $this->assertSame(MembershipRole::Manager, $organization->memberships()->sole()->role);
+            $this->assertSame($actor->id, $organization->memberships()->sole()->user_id);
+            $this->assertTrue($actor->canAccessTenant($organization));
+            $this->assertTrue($actor->manages($organization));
+            $this->assertSame($internalRole, $actor->fresh()->internal_role);
+            $this->assertSame($existingMemberships, $actor->memberships()->where('organization_id', '!=', $organization->id)->pluck('role', 'organization_id')->all());
+        }
+    }
+
+    public function test_self_creation_rejects_repeated_names_without_granting_existing_management(): void
+    {
+        $organization = $this->access->createOrganizationForSelf($this->staff, 'Jugendtreff Süd');
+
+        foreach ([$this->staff, $this->caseworker] as $actor) {
+            try {
+                $this->access->createOrganizationForSelf($actor, ' JUGENDTREFF SÜD ');
+                $this->fail('Duplicate organization created');
+            } catch (ValidationException $exception) {
+                $this->assertArrayHasKey('name', $exception->errors());
+            }
+        }
+
+        $this->assertDatabaseCount('organizations', 2);
+        $this->assertSame($this->staff->id, $organization->memberships()->sole()->user_id);
+        $this->assertFalse($this->caseworker->memberships()->where('organization_id', $organization->id)->exists());
+    }
+
+    public static function invalidOrganizationNames(): array
+    {
+        return ['empty' => [''], 'whitespace' => ['   '], 'too long' => [str_repeat('ü', 256)]];
+    }
+
+    #[DataProvider('invalidOrganizationNames')]
+    public function test_self_creation_validates_the_name(string $name): void
+    {
+        try {
+            $this->access->createOrganizationForSelf($this->staff, $name);
+            $this->fail('Invalid organization created');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('name', $exception->errors());
+        }
+
+        $this->assertDatabaseCount('organizations', 1);
+        $this->assertSame(1, $this->staff->memberships()->count());
+    }
+
+    public function test_self_creation_accepts_a_255_character_name(): void
+    {
+        $name = str_repeat('ü', 255);
+        $this->assertSame($name, $this->access->createOrganizationForSelf($this->staff, $name)->name);
+    }
+
+    public static function restrictedAccountChanges(): array
+    {
+        return ['inactive' => [['is_active' => false]], 'unverified' => [['email_verified_at' => null]]];
+    }
+
+    /** @param array{is_active?: bool, email_verified_at?: null} $changes */
+    #[DataProvider('restrictedAccountChanges')]
+    public function test_self_creation_rechecks_stale_account_status(array $changes): void
+    {
+        User::query()->whereKey($this->staff->id)->update($changes);
+        $this->assertFalse(Gate::forUser($this->staff->fresh())->allows('createForSelf', Organization::class));
+
+        try {
+            $this->access->createOrganizationForSelf($this->staff, 'Unzulässige Einrichtung');
+            $this->fail('Restricted account created an organization');
+        } catch (HttpException $exception) {
+            $this->assertSame(403, $exception->getStatusCode());
+        }
+
+        $this->assertDatabaseCount('organizations', 1);
+        $this->assertSame(1, $this->staff->memberships()->count());
+    }
+
+    public function test_self_creation_rolls_back_if_membership_creation_fails(): void
+    {
+        $eventName = 'eloquent.creating: '.OrganizationMembership::class;
+        Event::listen($eventName, function (OrganizationMembership $membership): void {
+            throw new RuntimeException('Membership creation failed');
+        });
+
+        try {
+            $this->access->createOrganizationForSelf($this->staff, 'Einrichtung ohne Mitgliedschaft');
+            $this->fail('Membership failure was ignored');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Membership creation failed', $exception->getMessage());
+        } finally {
+            Event::forget($eventName);
+        }
+
+        $this->assertDatabaseCount('organizations', 1);
+        $this->assertSame(1, $this->staff->memberships()->count());
+        $this->assertNotNull($this->access->createOrganizationForSelf($this->staff, 'Einrichtung ohne Mitgliedschaft')->id);
+    }
+
+    public function test_self_creation_does_not_proceed_while_the_normalized_name_is_locked(): void
+    {
+        $lock = Cache::lock('portal:organizations:create:'.hash('sha256', 'jugendtreff süd'), 30);
+        $this->assertTrue($lock->get());
+
+        try {
+            $this->access->createOrganizationForSelf($this->staff, ' JUGENDTREFF SÜD ');
+            $this->fail('Organization created while locked');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('name', $exception->errors());
+        } finally {
+            $lock->release();
+        }
+
+        $this->assertDatabaseCount('organizations', 1);
+        $this->assertNotNull($this->access->createOrganizationForSelf($this->staff, 'Jugendtreff Süd')->id);
+    }
+
     public function test_caseworker_cannot_change_organization_configuration(): void
     {
         $this->expectException(AuthorizationException::class);
         $this->access->renameOrganization($this->caseworker, $this->organization, 'Unzulässig');
+    }
+
+    public static function organizationVerifiers(): array
+    {
+        return ['global admin' => ['admin'], 'caseworker' => ['caseworker']];
+    }
+
+    #[DataProvider('organizationVerifiers')]
+    public function test_internal_users_can_verify_organizations_without_changing_access(string $actorName): void
+    {
+        $outsider = User::factory()->create();
+        $joinRequest = JoinRequest::factory()->create(['organization_id' => $this->organization->id, 'user_id' => $outsider->id]);
+        $memberships = $this->organization->memberships()->get()->toArray();
+        $this->freezeSecond();
+        $this->access->verifyOrganization($this->{$actorName}, $this->organization);
+        $organization = $this->organization->fresh();
+
+        $this->assertTrue($organization->verified_at->equalTo(now()));
+        $this->assertSame($this->{$actorName}->id, $organization->verified_by);
+        $this->assertTrue($organization->verifiedBy->is($this->{$actorName}));
+        $this->assertSame($memberships, $organization->memberships()->get()->toArray());
+        $this->assertSame(JoinRequestStatus::Pending, $joinRequest->fresh()->status);
+        $this->assertTrue($this->staff->canAccessTenant($organization));
+        $this->assertFalse($outsider->canAccessTenant($organization));
+        $this->assertTrue($this->manager->manages($organization));
+        $this->assertFalse($this->staff->manages($organization));
+    }
+
+    public function test_new_organizations_start_unverified(): void
+    {
+        $organizations = [
+            $this->organization,
+            $this->access->createOrganization($this->admin, 'Neue interne Einrichtung'),
+            $this->access->createOrganizationForSelf($this->staff, 'Neue eigene Einrichtung'),
+        ];
+
+        foreach ($organizations as $organization) {
+            $this->assertNull($organization->fresh()->verified_at);
+            $this->assertNull($organization->fresh()->verified_by);
+        }
+    }
+
+    public function test_repeated_verification_preserves_the_original_time_and_verifier(): void
+    {
+        $this->access->verifyOrganization($this->admin, $this->organization);
+        $verifiedAt = $this->organization->fresh()->verified_at;
+        $this->travel(1)->day();
+        $this->access->verifyOrganization($this->caseworker, $this->organization);
+
+        $this->assertTrue($this->organization->fresh()->verified_at->equalTo($verifiedAt));
+        $this->assertSame($this->admin->id, $this->organization->fresh()->verified_by);
+    }
+
+    public function test_external_users_cannot_verify_even_their_own_organization(): void
+    {
+        foreach ([$this->manager, $this->staff, User::factory()->create()] as $actor) {
+            try {
+                $this->access->verifyOrganization($actor, $this->organization);
+                $this->fail('External user verified an organization');
+            } catch (AuthorizationException) {
+                $this->assertNull($this->organization->fresh()->verified_at);
+                $this->assertNull($this->organization->fresh()->verified_by);
+            }
+        }
+    }
+
+    /** @param array{is_active?: bool, email_verified_at?: null} $changes */
+    #[DataProvider('restrictedAccountChanges')]
+    public function test_organization_verification_rechecks_stale_internal_account_status(array $changes): void
+    {
+        User::query()->whereKey($this->admin->id)->update($changes);
+
+        try {
+            $this->access->verifyOrganization($this->admin, $this->organization);
+            $this->fail('Restricted internal account verified an organization');
+        } catch (HttpException $exception) {
+            $this->assertSame(403, $exception->getStatusCode());
+        }
+
+        $this->assertNull($this->organization->fresh()->verified_at);
+        $this->assertNull($this->organization->fresh()->verified_by);
+    }
+
+    public function test_demoted_internal_user_cannot_verify_using_a_stale_object(): void
+    {
+        User::query()->whereKey($this->caseworker->id)->update(['internal_role' => null]);
+
+        try {
+            $this->access->verifyOrganization($this->caseworker, $this->organization);
+            $this->fail('Demoted internal user verified an organization');
+        } catch (AuthorizationException) {
+            $this->assertNull($this->organization->fresh()->verified_at);
+            $this->assertNull($this->organization->fresh()->verified_by);
+        }
+    }
+
+    public function test_deleting_the_verifier_preserves_organization_verification(): void
+    {
+        $this->access->verifyOrganization($this->caseworker, $this->organization);
+        $verifiedAt = $this->organization->fresh()->verified_at;
+        $this->caseworker->delete();
+
+        $this->assertTrue($this->organization->fresh()->verified_at->equalTo($verifiedAt));
+        $this->assertNull($this->organization->fresh()->verified_by);
     }
 
     public function test_caseworker_assigns_a_manager_to_another_organization(): void
