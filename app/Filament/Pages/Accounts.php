@@ -23,6 +23,11 @@ class Accounts extends AccessTablePage
         return auth()->user()?->fresh()?->isGlobalAdmin() ?? false;
     }
 
+    protected function getHeaderActions(): array
+    {
+        return [Action::make('create')->label('Konto anlegen')->url(CreateAccount::getUrl(panel: 'admin'))];
+    }
+
     public function table(Table $table): Table
     {
         return $table->query(User::query())->columns([
@@ -32,6 +37,7 @@ class Accounts extends AccessTablePage
             IconColumn::make('is_active')->label('Aktiv')->boolean(),
             IconColumn::make('email_verified_at')->label('E-Mail bestätigt')->getStateUsing(fn (User $record): bool => $record->hasVerifiedEmail())->boolean(),
         ])->recordActions([
+            Action::make('edit')->label('Konto bearbeiten')->url(fn (User $record): string => EditAccount::getUrl(['user' => $record->id], panel: 'admin')),
             Action::make('access')->label('Berechtigungen bearbeiten')
                 ->fillForm(fn (User $record): array => ['internal_role' => $record->internal_role?->value, 'is_active' => $record->is_active])
                 ->schema([

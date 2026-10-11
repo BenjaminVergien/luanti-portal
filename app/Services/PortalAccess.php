@@ -20,6 +20,7 @@ use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 class PortalAccess
@@ -266,18 +267,40 @@ class PortalAccess
         });
     }
 
-    public function updateAccount(User $actor, User $target, ?InternalRole $role, bool $active): void
+    /** @param array{name?: mixed, email?: mixed, password?: mixed, password_confirmation?: mixed, is_active?: mixed, email_verified?: mixed} $data */
+    public function createAccount(User $actor, #[\SensitiveParameter] array $data): User
     {
-        DB::transaction(function () use ($actor, $target, $role, $active): void {
+        return DB::transaction(function () use ($actor, $data): User {
+            Gate::forUser($this->currentUser($actor))->authorize('create', User::class);
+            $attributes = $this->validateAccountDetails($data);
+            $user = new User(collect($attributes)->only(['name', 'email', 'password'])->all());
+            $user->forceFill([
+                'is_active' => (bool) ($attributes['is_active'] ?? true),
+                'email_verified_at' => ($attributes['email_verified'] ?? false) ? now() : null,
+                'internal_role' => null,
+            ])->save();
+
+            return $user;
+        });
+    }
+
+    /** @param array{name?: mixed, email?: mixed, password?: mixed, password_confirmation?: mixed, email_verified?: mixed} $details */
+    public function updateAccount(User $actor, User $target, ?InternalRole $role, bool $active, #[\SensitiveParameter] array $details = []): void
+    {
+        DB::transaction(function () use ($actor, $target, $role, $active, $details): void {
             $admins = User::query()->where('internal_role', InternalRole::GlobalAdmin)->orderBy('id')->lockForUpdate()->get();
             $actor = $this->currentUser($actor);
             $target = User::query()->lockForUpdate()->findOrFail($target->id);
             Gate::forUser($actor)->authorize('update', $target);
-            if ($role !== null && ! $target->hasVerifiedEmail()) {
-                throw ValidationException::withMessages(['internal_role' => 'Interne Rollen benötigen eine bestätigte E-Mail-Adresse.']);
-            }
-            if ($target->isGlobalAdmin() && (! $active || $role !== InternalRole::GlobalAdmin) && $admins->filter(fn (User $admin): bool => $admin->isGlobalAdmin())->count() <= 1) {
+            $attributes = $this->validateAccountDetails($details, $target);
+            $emailChanged = isset($attributes['email']) && $attributes['email'] !== $target->email;
+            $verified = (bool) ($attributes['email_verified'] ?? (! $emailChanged && $target->hasVerifiedEmail()));
+            $verifiedAt = $verified ? (! $emailChanged && $target->hasVerifiedEmail() ? $target->email_verified_at : now()) : null;
+            if ($target->isGlobalAdmin() && (! $active || ! $verified || $role !== InternalRole::GlobalAdmin) && $admins->filter(fn (User $admin): bool => $admin->isGlobalAdmin())->count() <= 1) {
                 throw ValidationException::withMessages(['internal_role' => 'Der letzte aktive Globaladmin muss erhalten bleiben.']);
+            }
+            if ($role !== null && ! $verified) {
+                throw ValidationException::withMessages(['internal_role' => 'Interne Rollen benötigen eine bestätigte E-Mail-Adresse.']);
             }
             if ($target->internal_role === null && $role !== null) {
                 throw ValidationException::withMessages(['internal_role' => 'Neue interne Rollen werden per Einladung vergeben.']);
@@ -285,7 +308,38 @@ class PortalAccess
             if ($target->internal_role === InternalRole::Caseworker && $role === InternalRole::GlobalAdmin) {
                 throw ValidationException::withMessages(['internal_role' => 'Die Globaladminrolle wird per Einladung vergeben.']);
             }
-            $target->forceFill(['internal_role' => $role, 'is_active' => $active])->save();
+            if (blank($attributes['password'] ?? null)) {
+                unset($attributes['password']);
+            }
+            $target->fill(collect($attributes)->only(['name', 'email', 'password'])->all());
+            $target->forceFill(['internal_role' => $role, 'is_active' => $active, 'email_verified_at' => $verifiedAt])->save();
         });
+    }
+
+    /**
+     * @param  array{name?: mixed, email?: mixed, password?: mixed, password_confirmation?: mixed, is_active?: mixed, email_verified?: mixed}  $data
+     * @return array{name?: string, email?: string, password?: ?string, is_active?: bool|int|string, email_verified?: bool|int|string}
+     */
+    private function validateAccountDetails(#[\SensitiveParameter] array $data, ?User $target = null): array
+    {
+        if (is_string($data['name'] ?? null)) {
+            $data['name'] = trim($data['name']);
+        }
+        if (is_string($data['email'] ?? null)) {
+            $data['email'] = Str::lower(trim($data['email']));
+        }
+        if ($target !== null && ($data['password'] ?? null) === '') {
+            $data['password'] = null;
+        }
+
+        $presenceRules = $target === null ? ['required'] : ['sometimes', 'required'];
+
+        return Validator::make($data, [
+            'name' => [...$presenceRules, 'string', 'max:255'],
+            'email' => [...$presenceRules, 'email', 'max:255', Rule::unique(User::class, 'email')->ignore($target?->id)],
+            'password' => [$target === null ? 'required' : 'nullable', 'string', 'min:12', 'confirmed'],
+            'is_active' => ['sometimes', 'boolean'],
+            'email_verified' => ['sometimes', 'boolean'],
+        ])->validate();
     }
 }

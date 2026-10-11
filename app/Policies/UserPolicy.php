@@ -8,11 +8,16 @@ class UserPolicy
 {
     public function viewAny(User $user): bool
     {
-        return $user->isGlobalAdmin();
+        return $user->fresh()?->isGlobalAdmin() ?? false;
+    }
+
+    public function create(User $user): bool
+    {
+        return $this->viewAny($user);
     }
 
     public function update(User $user, User $target): bool
     {
-        return $user->isGlobalAdmin();
+        return $this->viewAny($user);
     }
 }

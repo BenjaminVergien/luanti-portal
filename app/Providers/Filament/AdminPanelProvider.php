@@ -3,7 +3,9 @@
 namespace App\Providers\Filament;
 
 use App\Filament\Pages\Accounts;
+use App\Filament\Pages\CreateAccount;
 use App\Filament\Pages\Dashboard;
+use App\Filament\Pages\EditAccount;
 use App\Filament\Pages\Invitations;
 use App\Filament\Pages\LuantiServers;
 use App\Filament\Pages\Members;
@@ -41,6 +43,6 @@ class AdminPanelProvider extends PanelProvider
     public function panel(Panel $panel): Panel
     {
         return $this->configurePanel($panel)->default()->id('admin')->path('admin')
-            ->pages([Dashboard::class, Organizations::class, Members::class, Requests::class, Invitations::class, Accounts::class, LuantiServers::class]);
+            ->pages([Dashboard::class, Organizations::class, Members::class, Requests::class, Invitations::class, Accounts::class, CreateAccount::class, EditAccount::class, LuantiServers::class]);
     }
 }
