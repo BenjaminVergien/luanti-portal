@@ -3,11 +3,15 @@
 namespace App\Filament\Pages;
 
 use App\Models\LuantiServer;
+use App\Services\LuantiApiConnectionChecker;
 use App\Services\LuantiServerRegistry;
 use Filament\Actions\Action;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
+use Filament\Notifications\Notification;
+use Filament\Schemas\Components\Actions;
+use Filament\Schemas\Components\Utilities\Get;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
@@ -47,6 +51,10 @@ class LuantiServers extends AccessTablePage
             IconColumn::make('has_api_token')->label('API-Token hinterlegt')
                 ->getStateUsing(fn (LuantiServer $record): bool => filled($record->getRawOriginal('api_token')))->boolean(),
         ])->recordActions([
+            Action::make('checkConnection')->label('API-Verbindung prüfen')
+                ->action(function (LuantiServer $record): void {
+                    $this->notifyConnectionResult(app(LuantiApiConnectionChecker::class)->check($this->actor(), server: $record));
+                }),
             Action::make('edit')->label('Bearbeiten')
                 ->fillForm(fn (LuantiServer $record): array => $record->only(['name', 'notes', 'domain', 'game_port', 'api_base_url']))
                 ->schema($this->serverFields())
@@ -70,7 +78,7 @@ class LuantiServers extends AccessTablePage
         ])->emptyStateHeading('Noch keine Luanti-Server');
     }
 
-    /** @return list<TextInput|Textarea> */
+    /** @return list<TextInput|Textarea|Actions> */
     private function serverFields(): array
     {
         return [
@@ -80,9 +88,24 @@ class LuantiServers extends AccessTablePage
                 ->helperText('Domain des Spielservers, z. B. luanti.example.org (ohne https://, Port oder Pfad).'),
             TextInput::make('game_port')->label('Spiel-Port')->required()->integer()->minValue(1)->maxValue(65535),
             TextInput::make('api_base_url')->label('HTTPS-API-URL')->maxLength(2048)->rules(['url:https'])
-                ->helperText('Optionaler Endpunkt der zukünftigen Bridge. Die Verbindung wird noch nicht geprüft.'),
+                ->helperText('HTTPS-Basis-URL der Bridge, z. B. https://bensfoundry.de. Die API-Pfade /v1/... werden bei der Prüfung ergänzt.'),
             TextInput::make('api_token')->label('API-Token')->password()->autocomplete('off')
                 ->helperText('Optionaler Token der Bridge. Leer lassen, um einen bereits gespeicherten Token beizubehalten.'),
+            Actions::make([
+                Action::make('checkConnection')->label('API-Verbindung prüfen')
+                    ->action(function (Get $get, ?LuantiServer $record): void {
+                        $this->notifyConnectionResult(app(LuantiApiConnectionChecker::class)->check($this->actor(), [
+                            'api_base_url' => $get('api_base_url'), 'api_token' => $get('api_token'),
+                        ], $record));
+                    }),
+            ])->key('connectionCheck'),
         ];
+    }
+
+    /** @param array{successful: bool, title: string, body: string} $result */
+    private function notifyConnectionResult(array $result): void
+    {
+        Notification::make()->title($result['title'])->body($result['body'])
+            ->status($result['successful'] ? 'success' : 'danger')->send();
     }
 }
