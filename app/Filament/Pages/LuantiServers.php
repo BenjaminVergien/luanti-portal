@@ -5,6 +5,7 @@ namespace App\Filament\Pages;
 use App\Models\LuantiServer;
 use App\Services\LuantiApiConnectionChecker;
 use App\Services\LuantiServerRegistry;
+use App\Services\LuantiWorldSynchronizer;
 use Filament\Actions\Action;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\Textarea;
@@ -51,7 +52,13 @@ class LuantiServers extends AccessTablePage
             TextColumn::make('api_base_url')->label('HTTPS-API-URL')->placeholder('Nicht konfiguriert')->wrap(),
             IconColumn::make('has_api_token')->label('API-Token hinterlegt')
                 ->getStateUsing(fn (LuantiServer $record): bool => filled($record->getRawOriginal('api_token')))->boolean(),
+            TextColumn::make('worlds_synced_at')->label('Welten synchronisiert')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('Noch nicht synchronisiert'),
+            TextColumn::make('world_sync_error')->label('Letzter Synchronisierungsfehler')->placeholder('–')->wrap(),
         ])->recordActions([
+            Action::make('syncWorlds')->label('Welten synchronisieren')
+                ->action(function (LuantiServer $record): void {
+                    $this->notifyConnectionResult(app(LuantiWorldSynchronizer::class)->sync($this->actor(), $record));
+                }),
             Action::make('checkConnection')->label('API-Verbindung prüfen')
                 ->action(function (LuantiServer $record): void {
                     $this->notifyConnectionResult(app(LuantiApiConnectionChecker::class)->check($this->actor(), server: $record));

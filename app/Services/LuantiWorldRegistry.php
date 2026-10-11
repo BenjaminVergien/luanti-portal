@@ -27,10 +27,13 @@ class LuantiWorldRegistry
     /** @param array{luanti_server_id?: mixed, name?: mixed, world_identifier?: mixed, is_selectable?: mixed} $data */
     public function create(User $actor, array $data): LuantiWorld
     {
-        return DB::transaction(function () use ($actor, $data): LuantiWorld {
+        Gate::forUser($this->access->currentUser($actor))->authorize('create', LuantiWorld::class);
+        $attributes = $this->validate($data);
+
+        return DB::transaction(function () use ($actor, $data, $attributes): LuantiWorld {
+            LuantiServer::query()->whereKey($attributes['luanti_server_id'])->lockForUpdate()->firstOrFail();
             Gate::forUser($this->access->currentUser($actor))->authorize('create', LuantiWorld::class);
             $attributes = $this->validate($data);
-            LuantiServer::query()->whereKey($attributes['luanti_server_id'])->lockForUpdate()->firstOrFail();
 
             return LuantiWorld::query()->create($attributes);
         });
@@ -39,15 +42,26 @@ class LuantiWorldRegistry
     /** @param array{luanti_server_id?: mixed, name?: mixed, world_identifier?: mixed, is_selectable?: mixed} $data */
     public function update(User $actor, LuantiWorld $world, array $data): void
     {
-        DB::transaction(function () use ($actor, $world, $data): void {
+        $world = $world->fresh();
+        abort_if($world === null, 404);
+        Gate::forUser($this->access->currentUser($actor))->authorize('update', $world);
+        $attributes = $this->validate($data, $world);
+
+        DB::transaction(function () use ($actor, $world, $data, $attributes): void {
+            LuantiServer::query()->whereIn('id', [$world->luanti_server_id, $attributes['luanti_server_id']])
+                ->orderBy('id')->lockForUpdate()->get();
+            $actor = $this->access->currentUser($actor);
+            $originalServerId = $world->luanti_server_id;
             $world = LuantiWorld::query()->whereKey($world->id)->lockForUpdate()->firstOrFail();
-            Gate::forUser($this->access->currentUser($actor))->authorize('update', $world);
-            $attributes = $this->validate($data, $world);
-            if ($world->worldRequests()->exists() && ((int) $attributes['luanti_server_id'] !== $world->luanti_server_id
-                || $attributes['world_identifier'] !== $world->world_identifier)) {
-                throw ValidationException::withMessages(['world_identifier' => 'Server und Weltkennung eines bereits beantragten Eintrags können nicht geändert werden.']);
+            Gate::forUser($actor)->authorize('update', $world);
+            if ($world->luanti_server_id !== $originalServerId) {
+                throw ValidationException::withMessages(['luanti_server_id' => 'Der Server wurde inzwischen geändert. Bitte öffne das Formular erneut.']);
             }
-            LuantiServer::query()->whereKey($attributes['luanti_server_id'])->lockForUpdate()->firstOrFail();
+            $attributes = $this->validate($data, $world);
+            if (($world->last_discovered_at !== null || $world->worldRequests()->exists()) && ((int) $attributes['luanti_server_id'] !== $world->luanti_server_id
+                || $attributes['world_identifier'] !== $world->world_identifier)) {
+                throw ValidationException::withMessages(['world_identifier' => 'Server und Weltkennung eines synchronisierten oder bereits beantragten Eintrags können nicht geändert werden.']);
+            }
             $world->update($attributes);
         });
     }

@@ -37,10 +37,10 @@ class WorldRequests
         }
 
         return LuantiWorld::query()->with('server')
-            ->where(fn (Builder $query): Builder => $query->where('is_selectable', true)
+            ->where(fn (Builder $query): Builder => $query->where(fn (Builder $query): Builder => $query->where('is_selectable', true)->where('is_available', true))
                 ->when($request !== null, fn (Builder $query): Builder => $query->orWhereKey($request->luanti_world_id)))
             ->orderBy('name')->get()->mapWithKeys(fn (LuantiWorld $world): array => [
-                $world->id => $world->name.' ('.$world->server->name.')'.($world->is_selectable ? '' : ' – Nicht mehr beantragbar'),
+                $world->id => $world->name.' ('.$world->server->name.')'.($world->is_selectable && $world->is_available ? '' : ' – Nicht mehr beantragbar'),
             ])->all();
     }
 
@@ -106,7 +106,7 @@ class WorldRequests
     private function checkWorld(int|string $worldId, bool $requireSelectable): void
     {
         $world = LuantiWorld::query()->whereKey($worldId)->lockForUpdate()->first();
-        if ($world === null || ($requireSelectable && ! $world->is_selectable)) {
+        if ($world === null || ($requireSelectable && (! $world->is_selectable || ! $world->is_available))) {
             throw ValidationException::withMessages(['luanti_world_id' => 'Bitte wähle eine aktuell beantragbare Welt.']);
         }
     }

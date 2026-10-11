@@ -17,7 +17,7 @@ class LuantiWorld extends Model
 
     protected function casts(): array
     {
-        return ['is_selectable' => 'boolean'];
+        return ['is_selectable' => 'boolean', 'is_available' => 'boolean', 'last_discovered_at' => 'datetime'];
     }
 
     public function server(): BelongsTo

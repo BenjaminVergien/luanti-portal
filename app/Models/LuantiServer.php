@@ -18,7 +18,7 @@ class LuantiServer extends Model
 
     protected function casts(): array
     {
-        return ['game_port' => 'integer', 'api_token' => 'encrypted'];
+        return ['game_port' => 'integer', 'api_token' => 'encrypted', 'worlds_synced_at' => 'datetime'];
     }
 
     public function worlds(): HasMany
