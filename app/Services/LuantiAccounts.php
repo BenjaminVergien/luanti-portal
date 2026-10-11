@@ -1,0 +1,407 @@
+<?php
+
+namespace App\Services;
+
+use App\Enums\WorldRequestStatus;
+use App\Jobs\ProcessLuantiAccounts;
+use App\Models\LuantiAccount;
+use App\Models\LuantiAccountAssignment;
+use App\Models\LuantiAccountJob;
+use App\Models\LuantiWorld;
+use App\Models\User;
+use App\Models\WorldRequest;
+use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
+
+class LuantiAccounts
+{
+    public function authorize(User $actor): void
+    {
+        abort_unless($actor->fresh()?->isInternal(), 403);
+    }
+
+    /** @return array{world_id: int, starts_at: int, ends_at: int, generation: int} */
+    public function snapshot(WorldRequest $request): array
+    {
+        return ['world_id' => $request->luanti_world_id,
+            'starts_at' => CarbonImmutable::parse($request->start_date->toDateString(), 'Europe/Berlin')->startOfDay()->timestamp,
+            'ends_at' => CarbonImmutable::parse($request->end_date->toDateString(), 'Europe/Berlin')->addDay()->startOfDay()->timestamp,
+            'generation' => ($request->approved_access['generation'] ?? 0) + 1];
+    }
+
+    /** @param list<array{username: mixed, password: mixed, role: mixed}> $rows */
+    public function create(User $actor, WorldRequest $request, #[\SensitiveParameter] array $rows): void
+    {
+        $this->authorize($actor);
+        $data = Validator::make(['accounts' => $rows], [
+            'accounts' => ['required', 'array', 'min:1', 'max:100'],
+            'accounts.*.username' => ['required', 'string', 'regex:/\\A[A-Za-z0-9_-]{1,20}\\z/', 'distinct:ignore_case'],
+            'accounts.*.password' => ['required', 'string', 'min:12', 'max:1024'],
+            'accounts.*.role' => ['required', Rule::in(['participant', 'facilitator'])],
+        ])->validate();
+        DB::transaction(function () use ($actor, $request, $data): void {
+            $request = WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
+            $this->authorize($actor);
+            if ($request->status !== WorldRequestStatus::Approved) {
+                throw ValidationException::withMessages(['accounts' => 'Neue Spielaccounts benötigen einen genehmigten Weltantrag.']);
+            }
+            $snapshot = $request->approved_access ?? $this->snapshot($request);
+            $world = LuantiWorld::query()->whereKey($snapshot['world_id'])->lockForUpdate()->firstOrFail();
+            if (! $world->is_available) {
+                throw ValidationException::withMessages(['accounts' => 'Die genehmigte Welt ist nicht mehr verfügbar.']);
+            }
+            $request->forceFill(['approved_access' => $snapshot])->save();
+            foreach ($data['accounts'] as $index => $row) {
+                $normalized = strtolower($row['username']);
+                if (LuantiAccount::query()->where('world_request_id', $request->id)->where('normalized_username', $normalized)->exists()
+                    || LuantiAccountAssignment::query()->where('luanti_world_id', $world->id)->where('normalized_username', $normalized)->exists()) {
+                    throw ValidationException::withMessages(['accounts.'.$index.'.username' => 'Dieser Spielname ist für den Antrag oder diese Welt bereits vergeben.']);
+                }
+                $account = LuantiAccount::query()->create(['world_request_id' => $request->id, 'username' => $row['username'],
+                    'normalized_username' => $normalized, 'role' => $row['role'], 'initial_password' => $row['password']]);
+                $this->reserve($account, $world->id);
+            }
+            ProcessLuantiAccounts::dispatch($request->id)->afterCommit();
+        });
+    }
+
+    public function revealPassword(User $actor, LuantiAccount $account): string
+    {
+        $this->authorize($actor);
+
+        return $account->fresh()->initial_password;
+    }
+
+    public function retry(User $actor, WorldRequest $request): void
+    {
+        $this->authorize($actor);
+        DB::transaction(function () use ($actor, $request): void {
+            WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
+            $this->authorize($actor);
+            $unknown = LuantiAccountJob::query()->where('world_request_id', $request->id)->where('state', 'unknown')->first();
+            if ($unknown !== null) {
+                $unknown->update(['state' => 'pending']);
+            } else {
+                LuantiAccountAssignment::query()->whereHas('account', fn (Builder $query): Builder => $query->where('world_request_id', $request->id))->update(['error' => null]);
+            }
+            ProcessLuantiAccounts::dispatch($request->id)->afterCommit();
+        });
+    }
+
+    public function canCorrect(LuantiAccount $account): bool
+    {
+        return ! LuantiAccountJob::query()->where('world_request_id', $account->world_request_id)->whereIn('state', ['queued', 'pending', 'unknown'])->exists()
+            && $account->assignments()->exists()
+            && ! $account->assignments()->whereNotNull('applied_window')->exists()
+            && ! $account->assignments()->where('outcome_uncertain', true)->exists()
+            && ! $account->assignments()->where(fn (Builder $query): Builder => $query->whereNull('error')
+                ->orWhereNotIn('error', ['protected_account', 'existing_account']))->exists();
+    }
+
+    /** @param array{username: mixed, password: mixed} $data */
+    public function correctRejected(User $actor, LuantiAccount $account, #[\SensitiveParameter] array $data): void
+    {
+        $this->authorize($actor);
+        $validated = Validator::make($data, ['username' => ['required', 'string', 'regex:/\A[A-Za-z0-9_-]{1,20}\z/'],
+            'password' => ['required', 'string', 'min:12', 'max:1024']])->validate();
+        DB::transaction(function () use ($actor, $account, $validated): void {
+            $request = WorldRequest::query()->whereKey($account->world_request_id)->lockForUpdate()->firstOrFail();
+            $this->authorize($actor);
+            $account = $account->fresh();
+            if ($request->status !== WorldRequestStatus::Approved || ! $this->canCorrect($account)) {
+                throw ValidationException::withMessages(['username' => 'Dieser Account kann nicht sicher umbenannt werden. Bitte den bestehenden Auftrag prüfen.']);
+            }
+            $normalized = strtolower($validated['username']);
+            if (LuantiAccount::query()->where('world_request_id', $request->id)->where('normalized_username', $normalized)->whereKeyNot($account->id)->exists()) {
+                throw ValidationException::withMessages(['username' => 'Dieser Spielname ist bereits vergeben.']);
+            }
+            $assignments = $account->assignments()->orderBy('luanti_world_id')->get();
+            LuantiWorld::query()->whereIn('id', $assignments->pluck('luanti_world_id'))->orderBy('id')->lockForUpdate()->get();
+            foreach ($assignments as $assignment) {
+                if (LuantiAccountAssignment::query()->where('luanti_world_id', $assignment->luanti_world_id)->where('normalized_username', $normalized)
+                    ->where('luanti_account_id', '<>', $account->id)->exists()) {
+                    throw ValidationException::withMessages(['username' => 'Dieser Spielname ist in der Welt bereits vergeben.']);
+                }
+                $assignment->update(['normalized_username' => $normalized, 'error' => null]);
+            }
+            $account->update(['username' => $validated['username'], 'normalized_username' => $normalized, 'initial_password' => $validated['password']]);
+            ProcessLuantiAccounts::dispatch($request->id)->afterCommit();
+        });
+    }
+
+    public function status(LuantiAccount $account): string
+    {
+        $assignments = $account->assignments;
+        if ($assignments->contains(fn (LuantiAccountAssignment $assignment): bool => $assignment->error !== null)) {
+            return 'Fehlgeschlagen';
+        }
+        if ($assignments->contains(fn (LuantiAccountAssignment $assignment): bool => $assignment->outcome_uncertain)) {
+            return 'Ausgang unklar';
+        }
+        $assignment = $assignments->first(fn (LuantiAccountAssignment $assignment): bool => $assignment->applied_admitted && $assignment->applied_window !== null);
+        if ($assignment === null) {
+            return 'Vorbereitet';
+        }
+        $now = now()->timestamp;
+
+        return $now < $assignment->applied_window['starts_at'] ? 'Noch nicht freigegeben'
+            : ($now >= $assignment->applied_window['ends_at'] ? 'Abgelaufen' : 'Freigegeben');
+    }
+
+    public function reconcile(int $requestId): void
+    {
+        DB::transaction(function () use ($requestId): void {
+            $request = WorldRequest::query()->whereKey($requestId)->lockForUpdate()->firstOrFail();
+            if (LuantiAccountJob::query()->where('world_request_id', $requestId)->whereIn('state', ['queued', 'pending', 'unknown'])->exists()) {
+                return;
+            }
+            $desired = $request->approved_access;
+            if ($desired === null && $request->status === WorldRequestStatus::Approved) {
+                $desired = $this->snapshot($request);
+                $request->forceFill(['approved_access' => $desired])->save();
+            }
+            if ($desired === null) {
+                return;
+            }
+            $window = ['starts_at' => $desired['starts_at'], 'ends_at' => $desired['ends_at']];
+            $accounts = LuantiAccount::query()->where('world_request_id', $requestId)->with('assignments')->orderBy('id')->get();
+            $assignments = $accounts->flatMap->assignments;
+            if ($assignments->contains(fn (LuantiAccountAssignment $assignment): bool => $assignment->error !== null)) {
+                return;
+            }
+            $old = $assignments->filter(fn (LuantiAccountAssignment $assignment): bool => $assignment->applied_admitted
+                && ($assignment->luanti_world_id !== $desired['world_id'] || $assignment->applied_window !== $window));
+            if ($old->isNotEmpty()) {
+                $worldId = $old->first()->luanti_world_id;
+                $batch = $old->where('luanti_world_id', $worldId)->take(100);
+                $this->makeJob($request, $worldId, 'revoke', $desired['generation'], $batch->map(fn (LuantiAccountAssignment $assignment): array => [
+                    'account' => $accounts->firstWhere('id', $assignment->luanti_account_id), 'window' => $assignment->applied_window,
+                ])->values()->all());
+
+                return;
+            }
+            $world = LuantiWorld::query()->whereKey($desired['world_id'])->lockForUpdate()->firstOrFail();
+            if (! $world->is_available) {
+                return;
+            }
+            $batch = [];
+            foreach ($accounts as $account) {
+                $assignment = $account->assignments->firstWhere('luanti_world_id', $world->id);
+                if ($assignment?->applied_admitted && $assignment->applied_window === $window && ! $assignment->outcome_uncertain) {
+                    continue;
+                }
+                if (! $this->reserve($account, $world->id)) {
+                    return;
+                }
+                $batch[] = ['account' => $account, 'window' => $window];
+                if (count($batch) === 100) {
+                    break;
+                }
+            }
+            if ($batch !== []) {
+                $this->makeJob($request, $world->id, 'grant', $desired['generation'], $batch);
+            }
+        });
+    }
+
+    private function reserve(LuantiAccount $account, int $worldId): bool
+    {
+        $assignment = LuantiAccountAssignment::query()->firstOrCreate([
+            'luanti_world_id' => $worldId, 'normalized_username' => $account->normalized_username,
+        ], ['luanti_account_id' => $account->id]);
+        if ($assignment->luanti_account_id !== $account->id) {
+            $account->assignments()->where('luanti_world_id', '<>', $worldId)->update(['error' => 'Spielname in der Zielwelt bereits vergeben.']);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    public function reserveApprovedWorld(WorldRequest $request): void
+    {
+        foreach ($request->luantiAccounts()->get() as $account) {
+            $collision = LuantiAccountAssignment::query()->where('luanti_world_id', $request->luanti_world_id)
+                ->where('normalized_username', $account->normalized_username)->where('luanti_account_id', '<>', $account->id)->exists();
+            if ($collision) {
+                throw ValidationException::withMessages(['luanti_world_id' => 'Ein Spielname dieses Antrags ist in der Zielwelt bereits vergeben. Bitte eine andere Welt wählen.']);
+            }
+            $this->reserve($account, $request->luanti_world_id);
+        }
+    }
+
+    /** @param list<array{account: LuantiAccount, window: array{starts_at: int, ends_at: int}}> $batch */
+    private function makeJob(WorldRequest $request, int $worldId, string $operation, int $generation, #[\SensitiveParameter] array $batch): void
+    {
+        $world = LuantiWorld::query()->with('server')->findOrFail($worldId);
+        $jobId = 'portal-'.Str::uuid();
+        $entries = array_map(fn (array $entry): array => [
+            'username' => $entry['account']->username, 'role' => $entry['account']->role, 'admitted' => $operation === 'grant',
+            'access_window' => $entry['window'], ...(! LuantiAccountAssignment::query()
+                ->where('luanti_account_id', $entry['account']->id)->where('luanti_world_id', $worldId)->where('is_provisioned', true)->exists()
+                    ? ['initial_password' => $entry['account']->initial_password] : []),
+        ], $batch);
+        $payload = json_encode(['version' => 2, 'job_id' => $jobId, 'operation' => 'sync_accounts', 'accounts' => $entries], JSON_THROW_ON_ERROR);
+        while (strlen($payload) > 256 * 1024) {
+            array_pop($entries);
+            array_pop($batch);
+            $payload = json_encode(['version' => 2, 'job_id' => $jobId, 'operation' => 'sync_accounts', 'accounts' => $entries], JSON_THROW_ON_ERROR);
+        }
+        LuantiAccountJob::query()->create(['world_request_id' => $request->id, 'luanti_world_id' => $worldId,
+            'job_id' => $jobId, 'operation' => $operation, 'state' => 'queued', 'generation' => $generation,
+            'base_url' => rtrim((string) $world->server->api_base_url, '/'), 'world_identifier' => $world->world_identifier,
+            'account_ids' => array_map(fn (array $entry): int => $entry['account']->id, $batch), 'request_payload' => $payload]);
+    }
+
+    public function process(int $jobId): void
+    {
+        $job = LuantiAccountJob::query()->findOrFail($jobId);
+        Cache::lock('luanti:accounts:process:'.$job->world_request_id, 60)->get(function () use ($job): void {
+            $job = $job->fresh();
+            if (! in_array($job->state, ['queued', 'pending'], true)) {
+                return;
+            }
+            $server = $job->world->server;
+            $base = rtrim((string) $server->api_base_url, '/');
+            $parts = parse_url($base);
+            if ($parts === false || ($parts['scheme'] ?? null) !== 'https' || ! isset($parts['host'])
+                || array_intersect(['user', 'pass', 'query', 'fragment'], array_keys($parts)) !== []
+                || $base !== $job->base_url || ! is_string($server->api_token) || $server->api_token === ''
+                || preg_match('/[\\r\\n]/', $server->api_token)) {
+                $job->update(['error' => 'HTTPS-API-Konfiguration fehlt oder wurde geändert.']);
+
+                return;
+            }
+            $url = $base.'/v1/worlds/'.rawurlencode($job->world_identifier).'/accounts/jobs';
+            try {
+                $client = Http::withToken($server->api_token)->acceptJson()->connectTimeout(3)->timeout(10)->withoutRedirecting();
+                $response = $job->state === 'queued'
+                    ? $client->withBody($job->request_payload, 'application/json')->post($url)
+                    : $client->get($url.'/'.rawurlencode($job->job_id));
+            } catch (ConnectionException) {
+                $job->update(['error' => 'Bridge nicht erreichbar. Der bestehende Auftrag wird erneut geprüft.']);
+
+                return;
+            }
+            if (! in_array($response->status(), [200, 202], true)) {
+                if (in_array($response->status(), [400, 404, 409, 413, 415], true)) {
+                    if ($job->state === 'pending' || $response->status() === 409) {
+                        $this->unknown($job);
+                    } else {
+                        $this->rejectJob($job, $response->status() === 400
+                            ? 'Bridge-Vertrag abgelehnt. Bitte die Bridge auf Account-API Version 2 aktualisieren.'
+                            : 'Die Bridge hat den Account-Auftrag abgelehnt.');
+                    }
+                } else {
+                    $job->update(['error' => $response->status() === 401 ? 'API-Token wurde abgelehnt.' : 'Bridge meldet einen Fehler. Auftrag bleibt erhalten.']);
+                }
+
+                return;
+            }
+            $envelope = strlen($response->body()) <= 256 * 1024 ? $response->json() : null;
+            if (! is_array($envelope) || ($envelope['version'] ?? null) !== 1 || ($envelope['job_id'] ?? null) !== $job->job_id
+                || ($envelope['world_id'] ?? null) !== $job->world_identifier) {
+                $this->unknown($job);
+
+                return;
+            }
+            if (($envelope['state'] ?? null) === 'pending') {
+                $job->update(['state' => 'pending', 'error' => null]);
+            } elseif (($envelope['state'] ?? null) === 'completed') {
+                $this->complete($job, $envelope['result'] ?? null);
+            } else {
+                $this->unknown($job);
+            }
+        });
+    }
+
+    private function unknown(LuantiAccountJob $job): void
+    {
+        $job->update(['state' => 'unknown', 'error' => 'Ausgang unbekannt. Neue Freigaben warten auf Klärung.']);
+    }
+
+    private function rejectJob(LuantiAccountJob $job, string $message): void
+    {
+        DB::transaction(function () use ($job, $message): void {
+            $job->update(['state' => 'completed', 'error' => $message]);
+            LuantiAccountAssignment::query()->where('luanti_world_id', $job->luanti_world_id)
+                ->whereIn('luanti_account_id', $job->account_ids)->update(['error' => $message]);
+        });
+    }
+
+    private function complete(LuantiAccountJob $job, mixed $result): void
+    {
+        $payload = json_decode($job->request_payload, true, flags: JSON_THROW_ON_ERROR);
+        if (is_array($result) && ($result['version'] ?? null) === 1 && ($result['code'] ?? null) === 'invalid_job') {
+            $this->rejectJob($job, 'Die Luanti-Bridge muss für zeitlich begrenzte Accounts aktualisiert werden.');
+
+            return;
+        }
+        if (! is_array($result) || ($result['version'] ?? null) !== 2 || ($result['job_id'] ?? null) !== $job->job_id
+            || ! in_array($result['status'] ?? null, ['ok', 'partial', 'error'], true) || ! is_array($result['accounts'] ?? null)) {
+            $this->unknown($job);
+
+            return;
+        }
+        if ($result['accounts'] === [] && $result['status'] === 'error' && is_string($result['code'] ?? null)) {
+            $this->rejectJob($job, 'Die Bridge hat den Account-Auftrag abgelehnt.');
+
+            return;
+        }
+        if (count($result['accounts']) !== count($payload['accounts'])) {
+            $this->unknown($job);
+
+            return;
+        }
+        $safeResults = [];
+        foreach ($payload['accounts'] as $index => $entry) {
+            $outcome = $result['accounts'][$index] ?? null;
+            if (! is_array($outcome) || ($outcome['username'] ?? null) !== $entry['username']
+                || ! in_array($outcome['status'] ?? null, ['created', 'updated', 'unchanged', 'rejected'], true)) {
+                $this->unknown($job);
+
+                return;
+            }
+            $safeResults[] = ['username' => $entry['username'], 'status' => $outcome['status'],
+                ...($outcome['status'] === 'rejected' ? ['code' => $this->safeCode($outcome['code'] ?? null)] : [])];
+        }
+        DB::transaction(function () use ($job, $payload, $safeResults, $result): void {
+            WorldRequest::query()->whereKey($job->world_request_id)->lockForUpdate()->firstOrFail();
+            foreach ($safeResults as $index => $outcome) {
+                $assignment = LuantiAccountAssignment::query()->where('luanti_world_id', $job->luanti_world_id)
+                    ->where('luanti_account_id', $job->account_ids[$index])->firstOrFail();
+                if ($outcome['status'] === 'rejected') {
+                    $changes = ['error' => $outcome['code']];
+                    if (! in_array($outcome['code'], ['protected_account', 'existing_account', 'initial_password_required'], true)) {
+                        $changes['outcome_uncertain'] = true;
+                        if ($job->operation === 'grant') {
+                            $changes['applied_window'] = $payload['accounts'][$index]['access_window'];
+                            $changes['applied_admitted'] = true;
+                        }
+                    }
+                    $assignment->update($changes);
+                } else {
+                    $entry = $payload['accounts'][$index];
+                    $assignment->update(['applied_window' => $entry['access_window'], 'applied_admitted' => $entry['admitted'],
+                        'is_provisioned' => true, 'outcome_uncertain' => false, 'error' => null]);
+                }
+            }
+            $job->update(['state' => 'completed', 'error' => null,
+                'result' => ['version' => 2, 'job_id' => $job->job_id, 'status' => $result['status'], 'accounts' => $safeResults]]);
+        });
+    }
+
+    private function safeCode(mixed $code): string
+    {
+        return in_array($code, ['protected_account', 'existing_account', 'initial_password_required', 'storage_error',
+            'account_creation_failed', 'account_update_failed'], true) ? $code : 'account_rejected';
+    }
+}

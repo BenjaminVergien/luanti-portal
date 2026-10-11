@@ -3,6 +3,7 @@
 namespace App\Filament\Pages;
 
 use App\Enums\WorldRequestStatus;
+use App\Models\LuantiAccount;
 use App\Models\Organization;
 use App\Models\WorldRequest;
 use App\Services\WorldRequests as WorldRequestService;
@@ -84,6 +85,11 @@ class WorldRequests extends AccessTablePage
                 TextColumn::make('decided_at')->label('Entschieden am')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('–'),
             ])->filters([SelectFilter::make('status')->label('Status')->options(WorldRequestStatus::options())])
             ->recordActions([
+                Action::make('spielaccounts')->label('Spielaccounts')->icon('heroicon-o-user-group')
+                    ->visible(fn (WorldRequest $record): bool => $this->isInternalPanel() && LuantiAccounts::canAccess()
+                        && ($record->status === WorldRequestStatus::Approved || $record->approved_access !== null
+                            || LuantiAccount::query()->where('world_request_id', $record->id)->exists()))
+                    ->url(fn (WorldRequest $record): string => LuantiAccounts::getUrl(['worldRequest' => $record->id], panel: 'admin')),
                 Action::make('edit')->label('Bearbeiten')
                     ->visible(fn (WorldRequest $record): bool => Gate::forUser($this->actor())->allows('update', $record))
                     ->fillForm(fn (WorldRequest $record): array => [

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\WorldRequestStatus;
+use App\Jobs\ProcessLuantiAccounts;
 use App\Models\LuantiWorld;
 use App\Models\Organization;
 use App\Models\User;
@@ -90,9 +91,14 @@ class WorldRequests
             $this->checkRevision($request, $expectedRevision);
             if ($approve) {
                 $this->checkWorld($request->luanti_world_id, requireSelectable: true);
+                app(LuantiAccounts::class)->reserveApprovedWorld($request);
+                $request->forceFill(['approved_access' => app(LuantiAccounts::class)->snapshot($request)]);
             }
             $request->forceFill(['status' => $approve ? WorldRequestStatus::Approved : WorldRequestStatus::Rejected,
                 'decided_by' => $actor->id, 'decided_at' => now(), 'revision' => $request->revision + 1])->save();
+            if ($approve && $request->luantiAccounts()->exists()) {
+                ProcessLuantiAccounts::dispatch($request->id)->afterCommit();
+            }
         });
     }
 
