@@ -46,4 +46,20 @@ class WorldRequestPolicy
     {
         return ($user->fresh()?->isInternal() ?? false) && $request->fresh()?->status === WorldRequestStatus::Pending;
     }
+
+    public function manageAccounts(User $user, WorldRequest $request): bool
+    {
+        $user = $user->fresh();
+        $request = $request->fresh();
+        if ($user === null || $request === null || ! $user->is_active || ! $user->hasVerifiedEmail()) {
+            return false;
+        }
+        if ($user->isInternal()) {
+            return true;
+        }
+
+        return $user->memberships()->where('organization_id', $request->organization_id)->exists()
+            && ($user->id === $request->user_id || $user->manages($request->organization))
+            && ($request->status === WorldRequestStatus::Approved || $request->approved_access !== null || $request->luantiAccounts()->exists());
+    }
 }

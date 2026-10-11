@@ -7,6 +7,7 @@ use App\Models\LuantiAccount;
 use App\Models\LuantiAccountAssignment;
 use App\Models\LuantiAccountJob;
 use App\Models\LuantiWorld;
+use App\Models\Organization;
 use App\Models\WorldRequest;
 use App\Services\LuantiAccounts as LuantiAccountService;
 use Carbon\CarbonImmutable;
@@ -20,6 +21,7 @@ use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Schema;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -43,7 +45,17 @@ class LuantiAccounts extends AccessTablePage
 
     public static function canAccess(): bool
     {
-        return Filament::getCurrentPanel()?->getId() === 'admin' && (auth()->user()?->fresh()?->isInternal() ?? false);
+        $actor = auth()->user()?->fresh();
+        if ($actor === null || ! $actor->is_active || ! $actor->hasVerifiedEmail()) {
+            return false;
+        }
+        $organization = Filament::getTenant();
+
+        return match (Filament::getCurrentPanel()?->getId()) {
+            'admin' => $actor->isInternal(),
+            'portal' => $organization instanceof Organization && $actor->canAccessTenant($organization),
+            default => false,
+        };
     }
 
     public function mount(int $worldRequest): void
@@ -141,7 +153,7 @@ class LuantiAccounts extends AccessTablePage
 
     public function getBreadcrumbs(): array
     {
-        return [WorldRequests::getUrl(panel: 'admin') => 'Weltanträge', $this->getTitle()];
+        return [WorldRequests::getUrl(panel: Filament::getCurrentPanel()->getId(), tenant: Filament::getTenant()) => 'Weltanträge', $this->getTitle()];
     }
 
     protected function getHeaderActions(): array
@@ -181,8 +193,10 @@ class LuantiAccounts extends AccessTablePage
     {
         abort_unless(static::canAccess(), 403);
         $request = WorldRequest::query()->with('world.server', 'organization')->findOrFail($this->worldRequestId);
+        abort_if(! $this->isInternalPanel() && $request->organization_id !== Filament::getTenant()->id, 404);
         abort_unless($request->status === WorldRequestStatus::Approved || $request->approved_access !== null
             || LuantiAccount::query()->where('world_request_id', $request->id)->exists(), 404);
+        Gate::forUser($this->actor())->authorize('manageAccounts', $request);
 
         return $request;
     }

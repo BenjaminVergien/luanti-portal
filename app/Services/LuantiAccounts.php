@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
@@ -23,9 +24,9 @@ use Illuminate\Validation\ValidationException;
 
 class LuantiAccounts
 {
-    public function authorize(User $actor): void
+    public function authorize(User $actor, WorldRequest $request): void
     {
-        abort_unless($actor->fresh()?->isInternal(), 403);
+        Gate::forUser($actor)->authorize('manageAccounts', $request);
     }
 
     /** @return array{world_id: int, starts_at: int, ends_at: int, generation: int} */
@@ -40,7 +41,7 @@ class LuantiAccounts
     /** @param list<array{username: mixed, password: mixed, role: mixed}> $rows */
     public function create(User $actor, WorldRequest $request, #[\SensitiveParameter] array $rows): void
     {
-        $this->authorize($actor);
+        $this->authorize($actor, $request);
         $data = Validator::make(['accounts' => $rows], [
             'accounts' => ['required', 'array', 'min:1', 'max:100'],
             'accounts.*.username' => ['required', 'string', 'regex:/\\A[A-Za-z0-9_-]{1,20}\\z/', 'distinct:ignore_case'],
@@ -49,7 +50,7 @@ class LuantiAccounts
         ])->validate();
         DB::transaction(function () use ($actor, $request, $data): void {
             $request = WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
-            $this->authorize($actor);
+            $this->authorize($actor, $request);
             if ($request->status !== WorldRequestStatus::Approved) {
                 throw ValidationException::withMessages(['accounts' => 'Neue Spielaccounts benötigen einen genehmigten Weltantrag.']);
             }
@@ -75,17 +76,18 @@ class LuantiAccounts
 
     public function revealPassword(User $actor, LuantiAccount $account): string
     {
-        $this->authorize($actor);
+        $account = $account->fresh();
+        $this->authorize($actor, $account->worldRequest);
 
-        return $account->fresh()->initial_password;
+        return $account->initial_password;
     }
 
     public function retry(User $actor, WorldRequest $request): void
     {
-        $this->authorize($actor);
+        $this->authorize($actor, $request);
         DB::transaction(function () use ($actor, $request): void {
-            WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
-            $this->authorize($actor);
+            $request = WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
+            $this->authorize($actor, $request);
             $unknown = LuantiAccountJob::query()->where('world_request_id', $request->id)->where('state', 'unknown')->first();
             if ($unknown !== null) {
                 $unknown->update(['state' => 'pending']);
@@ -109,12 +111,12 @@ class LuantiAccounts
     /** @param array{username: mixed, password: mixed} $data */
     public function correctRejected(User $actor, LuantiAccount $account, #[\SensitiveParameter] array $data): void
     {
-        $this->authorize($actor);
+        $this->authorize($actor, $account->fresh()->worldRequest);
         $validated = Validator::make($data, ['username' => ['required', 'string', 'regex:/\A[A-Za-z0-9_-]{1,20}\z/'],
             'password' => ['required', 'string', 'min:12', 'max:1024']])->validate();
         DB::transaction(function () use ($actor, $account, $validated): void {
             $request = WorldRequest::query()->whereKey($account->world_request_id)->lockForUpdate()->firstOrFail();
-            $this->authorize($actor);
+            $this->authorize($actor, $request);
             $account = $account->fresh();
             if ($request->status !== WorldRequestStatus::Approved || ! $this->canCorrect($account)) {
                 throw ValidationException::withMessages(['username' => 'Dieser Account kann nicht sicher umbenannt werden. Bitte den bestehenden Auftrag prüfen.']);

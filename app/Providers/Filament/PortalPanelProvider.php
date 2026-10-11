@@ -4,6 +4,7 @@ namespace App\Providers\Filament;
 
 use App\Filament\Auth\Register;
 use App\Filament\Pages\Invitations;
+use App\Filament\Pages\LuantiAccounts;
 use App\Filament\Pages\Members;
 use App\Filament\Pages\OrganizationHome;
 use App\Filament\Pages\Requests;
@@ -22,6 +23,6 @@ class PortalPanelProvider extends AdminPanelProvider
             ->tenant(Organization::class)->tenantRoutePrefix('einrichtung')
             ->authMiddleware([RedirectWithoutOrganization::class])
             ->tenantMiddleware([EnsureOrganizationAccess::class], isPersistent: true)
-            ->pages([OrganizationHome::class, Members::class, Requests::class, Invitations::class, WorldRequests::class]);
+            ->pages([OrganizationHome::class, Members::class, Requests::class, Invitations::class, WorldRequests::class, LuantiAccounts::class]);
     }
 }

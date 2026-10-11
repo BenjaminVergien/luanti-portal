@@ -86,10 +86,11 @@ class WorldRequests extends AccessTablePage
             ])->filters([SelectFilter::make('status')->label('Status')->options(WorldRequestStatus::options())])
             ->recordActions([
                 Action::make('spielaccounts')->label('Spielaccounts')->icon('heroicon-o-user-group')
-                    ->visible(fn (WorldRequest $record): bool => $this->isInternalPanel() && LuantiAccounts::canAccess()
+                    ->visible(fn (WorldRequest $record): bool => LuantiAccounts::canAccess() && Gate::forUser($this->actor())->allows('manageAccounts', $record)
                         && ($record->status === WorldRequestStatus::Approved || $record->approved_access !== null
                             || LuantiAccount::query()->where('world_request_id', $record->id)->exists()))
-                    ->url(fn (WorldRequest $record): string => LuantiAccounts::getUrl(['worldRequest' => $record->id], panel: 'admin')),
+                    ->url(fn (WorldRequest $record): string => LuantiAccounts::getUrl(['worldRequest' => $record->id],
+                        panel: Filament::getCurrentPanel()->getId(), tenant: $this->requestOrganization())),
                 Action::make('edit')->label('Bearbeiten')
                     ->visible(fn (WorldRequest $record): bool => Gate::forUser($this->actor())->allows('update', $record))
                     ->fillForm(fn (WorldRequest $record): array => [

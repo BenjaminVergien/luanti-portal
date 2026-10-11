@@ -2,10 +2,13 @@
 
 namespace Tests\Feature;
 
+use App\Enums\MembershipRole;
 use App\Filament\Pages\LuantiAccounts;
 use App\Filament\Pages\WorldRequests;
 use App\Models\LuantiAccount;
 use App\Models\LuantiAccountJob;
+use App\Models\Organization;
+use App\Models\OrganizationMembership;
 use App\Models\User;
 use App\Models\WorldRequest;
 use App\Services\LuantiAccounts as LuantiAccountService;
@@ -38,6 +41,22 @@ class LuantiAccountsInterfaceTest extends TestCase
         Filament::setCurrentPanel(Filament::getPanel('admin'));
         Filament::bootCurrentPanel();
         Filament::setTenant(null);
+    }
+
+    private function portalPanel(User $user, Organization $organization): void
+    {
+        $this->actingAs($user);
+        Filament::setCurrentPanel(Filament::getPanel('portal'));
+        Filament::bootCurrentPanel();
+        Filament::setTenant($organization);
+    }
+
+    private function applicantRequest(): WorldRequest
+    {
+        $request = WorldRequest::factory()->approved()->create();
+        OrganizationMembership::factory()->create(['organization_id' => $request->organization_id, 'user_id' => $request->user_id]);
+
+        return $request;
     }
 
     public function test_internal_staff_create_multiple_game_accounts_and_clear_password_form(): void
@@ -91,7 +110,7 @@ class LuantiAccountsInterfaceTest extends TestCase
         $actor = User::factory()->globalAdmin()->create($attributes);
         $request = WorldRequest::factory()->approved()->create();
         $this->actingAs($actor)->get('/admin/weltantraege/'.$request->id.'/spielaccounts')->assertForbidden();
-        $this->assertNotContains(LuantiAccounts::class, Filament::getPanel('portal')->getPages());
+        $this->assertContains(LuantiAccounts::class, Filament::getPanel('portal')->getPages());
     }
 
     public function test_open_form_rechecks_permissions_after_revocation(): void
@@ -194,5 +213,142 @@ class LuantiAccountsInterfaceTest extends TestCase
         $retry = LuantiAccountJob::query()->latest('id')->firstOrFail();
         $this->assertNotSame($job->job_id, $retry->job_id);
         $this->assertSame(['NewPlayer'], array_column(json_decode($retry->request_payload, true)['accounts'], 'username'));
+    }
+
+    public function test_applicant_has_own_approved_request_link_and_creates_game_accounts_in_tenant_panel(): void
+    {
+        $request = $this->applicantRequest();
+        $other = WorldRequest::factory()->approved()->create(['organization_id' => $request->organization_id]);
+        $pending = WorldRequest::factory()->create(['organization_id' => $request->organization_id, 'user_id' => $request->user_id]);
+        $this->portalPanel($request->applicant, $request->organization);
+        Livewire::test(WorldRequests::class)
+            ->assertActionHasUrl(TestAction::make('spielaccounts')->table($request), LuantiAccounts::getUrl(['worldRequest' => $request->id], panel: 'portal', tenant: $request->organization))
+            ->assertActionHidden(TestAction::make('spielaccounts')->table($other))
+            ->assertActionHidden(TestAction::make('spielaccounts')->table($pending));
+        $this->get('/portal/einrichtung/'.$request->organization_id.'/weltantraege/'.$request->id.'/spielaccounts')->assertOk();
+        $before = User::query()->count();
+        Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id])->fillForm(['accounts' => [
+            ['username' => 'Teacher', 'password' => 'Teacher-Password-123', 'role' => 'facilitator'],
+            ['username' => 'Player', 'password' => 'Player-Password-123', 'role' => 'participant'],
+        ]])->call('save')->assertHasNoFormErrors()->assertSet('data.accounts', [])
+            ->assertSee('Teacher')->assertSee('Player')->assertSee('Fachkraft')->assertSee('Mitglied')
+            ->assertDontSee('Teacher-Password-123')->assertDontSee('Player-Password-123');
+        $this->assertDatabaseCount('luanti_accounts', 2);
+        $this->assertDatabaseCount('users', $before);
+    }
+
+    public function test_applicant_can_reveal_retry_and_correct_only_own_account(): void
+    {
+        $request = $this->applicantRequest();
+        $this->portalPanel($request->applicant, $request->organization);
+        app(LuantiAccountService::class)->create($request->applicant, $request, [['username' => 'Reserved', 'password' => 'Player-Password-123', 'role' => 'participant']]);
+        $account = LuantiAccount::query()->sole();
+        $account->assignments()->update(['error' => 'existing_account']);
+        $otherAccount = LuantiAccount::factory()->create();
+        $page = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id])->assertDontSee($otherAccount->username)
+            ->assertDontSee('Player-Password-123');
+        $page->mountAction(TestAction::make('revealPassword')->table($account))->assertActionMounted(TestAction::make('revealPassword')->table($account));
+        $this->assertStringContainsString('Player-Password-123', $page->instance()->getMountedAction()->getModalContent()->toHtml());
+        $page->unmountAction()->callAction(TestAction::make('correctRejected')->table($account), ['username' => 'NewPlayer', 'password' => 'New-Password-123'])
+            ->assertHasNoActionErrors()->assertSee('NewPlayer')->assertDontSee('New-Password-123')
+            ->call('retryTransfers')->assertStatus(200);
+        $this->assertSame('NewPlayer', $account->fresh()->username);
+    }
+
+    public function test_other_members_cannot_open_or_follow_game_account_action(): void
+    {
+        $request = $this->applicantRequest();
+        $member = User::factory()->create();
+        OrganizationMembership::factory()->create(['organization_id' => $request->organization_id, 'user_id' => $member->id]);
+        $this->portalPanel($member, $request->organization);
+        Livewire::test(WorldRequests::class)->assertActionHidden(TestAction::make('spielaccounts')->table($request));
+        $this->get('/portal/einrichtung/'.$request->organization_id.'/weltantraege/'.$request->id.'/spielaccounts')->assertForbidden();
+        Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id])->assertForbidden();
+    }
+
+    public function test_cross_tenant_request_id_is_not_found_even_with_membership_in_both_organizations(): void
+    {
+        $request = $this->applicantRequest();
+        $otherOrganization = Organization::factory()->create();
+        OrganizationMembership::factory()->create(['organization_id' => $otherOrganization->id, 'user_id' => $request->user_id]);
+        $this->portalPanel($request->applicant, $otherOrganization);
+        $this->get('/portal/einrichtung/'.$otherOrganization->id.'/weltantraege/'.$request->id.'/spielaccounts')->assertNotFound();
+        Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id])->assertNotFound();
+    }
+
+    public static function applicantRevocations(): array
+    {
+        return ['removed membership' => ['membership'], 'inactive' => ['inactive'], 'unverified' => ['unverified']];
+    }
+
+    #[DataProvider('applicantRevocations')]
+    public function test_open_applicant_forms_recheck_membership_and_account_state_before_save_retry_or_reveal(string $revocation): void
+    {
+        $request = $this->applicantRequest();
+        $actor = $request->applicant;
+        $this->portalPanel($actor, $request->organization);
+        app(LuantiAccountService::class)->create($actor, $request, [['username' => 'Existing', 'password' => 'Existing-Password-123', 'role' => 'participant']]);
+        $account = LuantiAccount::query()->sole();
+        $save = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id])->fillForm(['accounts' => [
+            ['username' => 'Blocked', 'password' => 'Blocked-Password-123', 'role' => 'participant'],
+        ]]);
+        $retry = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id]);
+        $reveal = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id]);
+        if ($revocation === 'membership') {
+            $actor->memberships()->where('organization_id', $request->organization_id)->delete();
+        } else {
+            $actor->fresh()->forceFill($revocation === 'inactive' ? ['is_active' => false] : ['email_verified_at' => null])->save();
+        }
+        $save->call('save')->assertForbidden();
+        $retry->call('retryTransfers')->assertForbidden();
+        $reveal->mountAction(TestAction::make('revealPassword')->table($account))->assertForbidden();
+        $this->assertDatabaseCount('luanti_accounts', 1);
+    }
+
+    public function test_applicant_request_id_is_locked_against_client_tampering(): void
+    {
+        $request = $this->applicantRequest();
+        $this->portalPanel($request->applicant, $request->organization);
+        $other = WorldRequest::factory()->approved()->create(['organization_id' => $request->organization_id]);
+        $page = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id]);
+        $this->expectException(CannotUpdateLockedPropertyException::class);
+        $page->set('worldRequestId', $other->id);
+    }
+
+    public function test_current_institution_manager_can_create_reveal_and_retry_accounts_for_another_applicants_request(): void
+    {
+        $request = $this->applicantRequest();
+        $manager = User::factory()->create();
+        OrganizationMembership::factory()->manager()->create(['organization_id' => $request->organization_id, 'user_id' => $manager->id]);
+        $this->portalPanel($manager, $request->organization);
+        Livewire::test(WorldRequests::class)->assertActionHasUrl(TestAction::make('spielaccounts')->table($request),
+            LuantiAccounts::getUrl(['worldRequest' => $request->id], panel: 'portal', tenant: $request->organization));
+        $this->get('/portal/einrichtung/'.$request->organization_id.'/weltantraege/'.$request->id.'/spielaccounts')->assertOk();
+        $page = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id])->fillForm(['accounts' => [
+            ['username' => 'ManagerPlayer', 'password' => 'Manager-Password-123', 'role' => 'participant'],
+        ]])->call('save')->assertHasNoFormErrors()->call('retryTransfers')->assertStatus(200);
+        $account = LuantiAccount::query()->sole();
+        $page->mountAction(TestAction::make('revealPassword')->table($account))->assertActionMounted(TestAction::make('revealPassword')->table($account));
+        $this->assertStringContainsString('Manager-Password-123', $page->instance()->getMountedAction()->getModalContent()->toHtml());
+    }
+
+    public function test_manager_demotion_revokes_access_on_open_forms(): void
+    {
+        $request = $this->applicantRequest();
+        $manager = User::factory()->create();
+        $membership = OrganizationMembership::factory()->manager()->create(['organization_id' => $request->organization_id, 'user_id' => $manager->id]);
+        $this->portalPanel($manager, $request->organization);
+        app(LuantiAccountService::class)->create($manager, $request, [['username' => 'Existing', 'password' => 'Existing-Password-123', 'role' => 'participant']]);
+        $account = LuantiAccount::query()->sole();
+        $save = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id])->fillForm(['accounts' => [
+            ['username' => 'Blocked', 'password' => 'Blocked-Password-123', 'role' => 'participant'],
+        ]]);
+        $retry = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id]);
+        $reveal = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id]);
+        $membership->update(['role' => MembershipRole::Staff]);
+        $save->call('save')->assertForbidden();
+        $retry->call('retryTransfers')->assertForbidden();
+        $reveal->mountAction(TestAction::make('revealPassword')->table($account))->assertForbidden();
+        $this->assertDatabaseCount('luanti_accounts', 1);
     }
 }

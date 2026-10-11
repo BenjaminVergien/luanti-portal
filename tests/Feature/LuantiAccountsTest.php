@@ -2,12 +2,14 @@
 
 namespace Tests\Feature;
 
+use App\Enums\MembershipRole;
 use App\Jobs\ProcessLuantiAccounts;
 use App\Models\LuantiAccount;
 use App\Models\LuantiAccountAssignment;
 use App\Models\LuantiAccountJob;
 use App\Models\LuantiServer;
 use App\Models\LuantiWorld;
+use App\Models\OrganizationMembership;
 use App\Models\User;
 use App\Models\WorldRequest;
 use App\Services\LuantiAccounts;
@@ -516,5 +518,106 @@ class LuantiAccountsTest extends TestCase
         $this->artisan('luanti:accounts:recover')->assertSuccessful();
         $this->assertDatabaseCount('jobs', 1);
         Http::assertNothingSent();
+    }
+
+    public static function institutionAccountManagers(): array
+    {
+        return ['applicant' => ['applicant'], 'institution manager' => ['manager']];
+    }
+
+    private function institutionActor(string $role): User
+    {
+        $actor = $role === 'applicant' ? $this->worldRequest->applicant : User::factory()->create();
+        OrganizationMembership::factory()->create(['organization_id' => $this->worldRequest->organization_id,
+            'user_id' => $actor->id, 'role' => $role === 'manager' ? MembershipRole::Manager : MembershipRole::Staff]);
+
+        return $actor;
+    }
+
+    #[DataProvider('institutionAccountManagers')]
+    public function test_applicant_and_current_manager_can_manage_own_institutions_approved_request(string $role): void
+    {
+        $actor = $this->institutionActor($role);
+        $before = User::query()->count();
+        app(LuantiAccounts::class)->create($actor, $this->worldRequest, $this->rows());
+        $this->assertDatabaseCount('users', $before);
+        app(LuantiAccounts::class)->reconcile($this->worldRequest->id);
+        $job = LuantiAccountJob::query()->sole();
+        $this->fakeHttp(['*' => Http::response($this->completed($job, 'Player-2'))]);
+        app(LuantiAccounts::class)->process($job->id);
+        $account = LuantiAccount::query()->where('username', 'Player-2')->sole();
+        $this->assertSame('Player-Password-123', app(LuantiAccounts::class)->revealPassword($actor, $account));
+        app(LuantiAccounts::class)->correctRejected($actor, $account, ['username' => 'Corrected', 'password' => 'Corrected-Password-123']);
+        $this->assertSame('Corrected', $account->fresh()->username);
+        app(LuantiAccounts::class)->retry($actor, $this->worldRequest);
+        Queue::assertPushed(ProcessLuantiAccounts::class);
+    }
+
+    public static function institutionRevocations(): array
+    {
+        return ['applicant membership removed' => ['applicant', 'membership'], 'applicant inactive' => ['applicant', 'inactive'],
+            'applicant unverified' => ['applicant', 'unverified'], 'manager membership removed' => ['manager', 'membership'],
+            'manager demoted' => ['manager', 'demotion'], 'manager inactive' => ['manager', 'inactive'], 'manager unverified' => ['manager', 'unverified']];
+    }
+
+    #[DataProvider('institutionRevocations')]
+    public function test_all_management_services_recheck_institution_membership_role_and_active_verified_state(string $role, string $revocation): void
+    {
+        $actor = $this->institutionActor($role);
+        app(LuantiAccounts::class)->create($actor, $this->worldRequest, $this->rows());
+        $account = LuantiAccount::query()->where('username', 'Player-2')->sole();
+        $account->assignments()->update(['error' => 'existing_account']);
+        if ($revocation === 'membership') {
+            $actor->memberships()->where('organization_id', $this->worldRequest->organization_id)->delete();
+        } elseif ($revocation === 'demotion') {
+            $actor->memberships()->where('organization_id', $this->worldRequest->organization_id)->update(['role' => MembershipRole::Staff]);
+        } else {
+            $actor->fresh()->forceFill($revocation === 'inactive' ? ['is_active' => false] : ['email_verified_at' => null])->save();
+        }
+        $this->assertManagementDenied($actor, $account);
+    }
+
+    private function assertManagementDenied(User $actor, LuantiAccount $account): void
+    {
+        Queue::fake();
+        foreach (['create', 'retry', 'reveal', 'correct'] as $action) {
+            try {
+                match ($action) {
+                    'create' => app(LuantiAccounts::class)->create($actor, $this->worldRequest, [['username' => 'Blocked', 'password' => 'Blocked-Password-123', 'role' => 'participant']]),
+                    'retry' => app(LuantiAccounts::class)->retry($actor, $this->worldRequest),
+                    'reveal' => app(LuantiAccounts::class)->revealPassword($actor, $account),
+                    'correct' => app(LuantiAccounts::class)->correctRejected($actor, $account, ['username' => 'Blocked', 'password' => 'Blocked-Password-123']),
+                };
+                $this->fail('Expected authorization failure for '.$action.'.');
+            } catch (AuthorizationException|HttpException $exception) {
+                $this->assertDatabaseCount('luanti_accounts', 2);
+                $this->assertSame('Player-2', $account->fresh()->username);
+            }
+        }
+        Queue::assertNothingPushed();
+    }
+
+    public static function unrelatedInstitutionActors(): array
+    {
+        return ['other staff member' => ['staff'], 'manager of other institution' => ['other_manager'], 'applicant with no current membership' => ['former_applicant']];
+    }
+
+    #[DataProvider('unrelatedInstitutionActors')]
+    public function test_other_staff_other_institution_managers_and_former_members_have_no_account_management_services(string $role): void
+    {
+        app(LuantiAccounts::class)->create($this->actor, $this->worldRequest, $this->rows());
+        $account = LuantiAccount::query()->where('username', 'Player-2')->sole();
+        if ($role === 'former_applicant') {
+            $actor = $this->worldRequest->applicant;
+        } else {
+            $actor = User::factory()->create();
+            $factory = OrganizationMembership::factory();
+            if ($role === 'other_manager') {
+                $factory->manager()->create(['user_id' => $actor->id]);
+            } else {
+                $factory->create(['organization_id' => $this->worldRequest->organization_id, 'user_id' => $actor->id]);
+            }
+        }
+        $this->assertManagementDenied($actor, $account);
     }
 }
