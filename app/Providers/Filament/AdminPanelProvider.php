@@ -8,9 +8,11 @@ use App\Filament\Pages\Dashboard;
 use App\Filament\Pages\EditAccount;
 use App\Filament\Pages\Invitations;
 use App\Filament\Pages\LuantiServers;
+use App\Filament\Pages\LuantiWorlds;
 use App\Filament\Pages\Members;
 use App\Filament\Pages\Organizations;
 use App\Filament\Pages\Requests;
+use App\Filament\Pages\WorldRequests;
 use App\Http\Middleware\EnsurePortalAccount;
 use Filament\Actions\Action;
 use Filament\Http\Middleware\Authenticate;
@@ -43,6 +45,6 @@ class AdminPanelProvider extends PanelProvider
     public function panel(Panel $panel): Panel
     {
         return $this->configurePanel($panel)->default()->id('admin')->path('admin')
-            ->pages([Dashboard::class, Organizations::class, Members::class, Requests::class, Invitations::class, Accounts::class, CreateAccount::class, EditAccount::class, LuantiServers::class]);
+            ->pages([Dashboard::class, Organizations::class, Members::class, Requests::class, Invitations::class, Accounts::class, CreateAccount::class, EditAccount::class, LuantiServers::class, LuantiWorlds::class, WorldRequests::class]);
     }
 }

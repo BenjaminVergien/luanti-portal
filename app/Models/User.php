@@ -51,6 +51,11 @@ class User extends Authenticatable implements FilamentUser, HasTenants, MustVeri
         return $this->hasMany(OrganizationMembership::class);
     }
 
+    public function worldRequests(): HasMany
+    {
+        return $this->hasMany(WorldRequest::class);
+    }
+
     public function manages(Organization $organization): bool
     {
         return $this->is_active && $this->hasVerifiedEmail() && ($this->isInternal() || $this->memberships()->where('organization_id', $organization->id)->where('role', MembershipRole::Manager)->exists());

@@ -7,6 +7,7 @@ use App\Filament\Pages\Invitations;
 use App\Filament\Pages\Members;
 use App\Filament\Pages\OrganizationHome;
 use App\Filament\Pages\Requests;
+use App\Filament\Pages\WorldRequests;
 use App\Http\Middleware\EnsureOrganizationAccess;
 use App\Http\Middleware\RedirectWithoutOrganization;
 use App\Models\Organization;
@@ -21,6 +22,6 @@ class PortalPanelProvider extends AdminPanelProvider
             ->tenant(Organization::class)->tenantRoutePrefix('einrichtung')
             ->authMiddleware([RedirectWithoutOrganization::class])
             ->tenantMiddleware([EnsureOrganizationAccess::class], isPersistent: true)
-            ->pages([OrganizationHome::class, Members::class, Requests::class, Invitations::class]);
+            ->pages([OrganizationHome::class, Members::class, Requests::class, Invitations::class, WorldRequests::class]);
     }
 }

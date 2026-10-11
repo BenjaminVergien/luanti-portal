@@ -16,6 +16,7 @@ use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\ValidationException;
 
 class LuantiServers extends AccessTablePage
 {
@@ -72,7 +73,13 @@ class LuantiServers extends AccessTablePage
             Action::make('delete')->label('Löschen')->color('danger')->requiresConfirmation()
                 ->modalHeading('Server löschen?')->modalDescription('Der Servereintrag und seine gespeicherten Zugangsdaten werden aus dem Portal entfernt.')
                 ->action(function (LuantiServer $record): void {
-                    app(LuantiServerRegistry::class)->delete($this->actor(), $record);
+                    try {
+                        app(LuantiServerRegistry::class)->delete($this->actor(), $record);
+                    } catch (ValidationException $exception) {
+                        Notification::make()->title('Server kann nicht gelöscht werden')->body($exception->errors()['server'][0])->danger()->send();
+
+                        return;
+                    }
                     $this->saved('Server gelöscht');
                 }),
         ])->emptyStateHeading('Noch keine Luanti-Server');

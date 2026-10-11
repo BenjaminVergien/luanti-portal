@@ -29,6 +29,11 @@ class Organization extends Model
         return $this->hasMany(OrganizationMembership::class);
     }
 
+    public function worldRequests(): HasMany
+    {
+        return $this->hasMany(WorldRequest::class);
+    }
+
     public function users(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'organization_memberships')->withPivot('role')->withTimestamps();
