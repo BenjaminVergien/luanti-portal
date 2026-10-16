@@ -13,6 +13,7 @@ use App\Filament\Pages\LuantiWorldTemplates;
 use App\Filament\Pages\Members;
 use App\Filament\Pages\Organizations;
 use App\Filament\Pages\Requests;
+use App\Filament\Pages\Settings;
 use App\Filament\Pages\WorldRequests;
 use App\Http\Middleware\EnsurePortalAccount;
 use Filament\Actions\Action;
@@ -46,6 +47,6 @@ class AdminPanelProvider extends PanelProvider
     public function panel(Panel $panel): Panel
     {
         return $this->configurePanel($panel)->default()->id('admin')->path('admin')
-            ->pages([Dashboard::class, Organizations::class, Members::class, Requests::class, Invitations::class, Accounts::class, CreateAccount::class, EditAccount::class, LuantiServers::class, LuantiWorldTemplates::class, WorldRequests::class, LuantiAccounts::class]);
+            ->pages([Dashboard::class, Organizations::class, Members::class, Requests::class, Invitations::class, Accounts::class, CreateAccount::class, EditAccount::class, LuantiServers::class, Settings::class, LuantiWorldTemplates::class, WorldRequests::class, LuantiAccounts::class]);
     }
 }

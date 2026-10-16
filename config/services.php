@@ -2,6 +2,15 @@
 
 return [
 
+    'hetzner' => [
+        'token' => env('HETZNER_API_TOKEN'),
+    ],
+
+    'provisioning' => [
+        'ssh_binary' => env('SSH_BINARY', PHP_OS_FAMILY === 'Windows'
+            ? (getenv('SystemRoot') ?: 'C:\\Windows').'\\System32\\OpenSSH\\ssh.exe' : '/usr/bin/ssh'),
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | Third Party Services

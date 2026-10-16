@@ -64,7 +64,11 @@ class LuantiServerRegistry
         DB::transaction(function () use ($actor, $server): void {
             $server = LuantiServer::query()->whereKey($server->id)->lockForUpdate()->firstOrFail();
             Gate::forUser($this->access->currentUser($actor))->authorize('delete', $server);
-            if ($server->templates()->exists()) {
+            if ($server->hetzner_reference !== null && (! in_array($server->hetzner_status, ['deleted', 'create_failed'], true)
+                || $server->getRawOriginal('provisioning_private_key') !== null)) {
+                throw ValidationException::withMessages(['server' => 'Bitte zuerst die Hetzner-VM löschen und ihren Status aktualisieren.']);
+            }
+            if ($server->templates()->exists() || $server->gameInstances()->exists()) {
                 throw ValidationException::withMessages(['server' => 'Dieser Server enthält Katalogwelten und kann nicht gelöscht werden.']);
             }
             $server->delete();

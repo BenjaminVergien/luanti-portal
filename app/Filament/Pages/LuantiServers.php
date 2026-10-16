@@ -3,13 +3,18 @@
 namespace App\Filament\Pages;
 
 use App\Models\LuantiServer;
+use App\Services\HetznerVirtualMachines;
 use App\Services\LuantiApiConnectionChecker;
+use App\Services\LuantiDockerInstallation;
 use App\Services\LuantiServerRegistry;
 use App\Services\LuantiWorldTemplateSynchronizer;
+use App\Services\PortalSettings;
+use Closure;
 use Filament\Actions\Action;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
+use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Actions;
 use Filament\Schemas\Components\Utilities\Get;
@@ -35,19 +40,54 @@ class LuantiServers extends AccessTablePage
 
     protected function getHeaderActions(): array
     {
-        return [Action::make('create')->label('Server anlegen')
-            ->schema($this->serverFields())
-            ->action(function (array $data): void {
-                app(LuantiServerRegistry::class)->create($this->actor(), $data);
-                $this->saved('Server angelegt');
-            })];
+        return [
+            Action::make('createVm')->label('Hetzner-VM erstellen')
+                ->modalHeading('Hetzner-VM erstellen')
+                ->modalDescription('Erstellt eine kostenpflichtige VM mit eigenem SSH-Schlüssel. Wenn ein Luanti-Image gewählt ist, installiert die VM Docker und dieses Image beim ersten Start automatisch.')
+                ->modalSubmitActionLabel('Kostenpflichtige VM erstellen')
+                ->schema([
+                    TextEntry::make('selected_luanti_image')->label('Luanti-Image')
+                        ->state(fn (): string => app(PortalSettings::class)->luantiDockerImage() ?? 'Keines gewählt – nur VM erstellen'),
+                    TextInput::make('name')->label('VM-Name')->required()->minLength(2)->maxLength(253)
+                        ->rules(HetznerVirtualMachines::nameRules())
+                        ->mutateStateForValidationUsing(fn (?string $state): ?string => $state === null ? null : strtolower(trim($state)))
+                        ->validationMessages(HetznerVirtualMachines::nameValidationMessages())
+                        ->hintIcon('heroicon-o-information-circle', tooltip: HetznerVirtualMachines::NameHelp)
+                        ->extraInputAttributes(['title' => HetznerVirtualMachines::NameHelp])
+                        ->helperText('Buchstaben, Ziffern, Bindestriche und Punkte, z. B. test-2.0. Details am Info-Symbol.'),
+                    TextInput::make('server_type')->label('Servertyp')->required()->default('cx23')->maxLength(63)
+                        ->helperText('Typbezeichnung aus Hetzner, z. B. cx23. Preis und Verfügbarkeit im Hetzner-Projekt prüfen.'),
+                    TextInput::make('location')->label('Standort')->required()->default('nbg1')->maxLength(63),
+                    TextInput::make('image')->label('Betriebssystem-Image')->required()->default('ubuntu-24.04')->maxLength(63),
+                ])
+                ->action(function (array $data): void {
+                    $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->create($this->actor(), $data));
+                }),
+            Action::make('create')->label('Server anlegen')
+                ->schema($this->serverFields())
+                ->action(function (array $data): void {
+                    app(LuantiServerRegistry::class)->create($this->actor(), $data);
+                    $this->saved('Server angelegt');
+                })];
     }
 
     public function table(Table $table): Table
     {
         return $table->query(fn () => app(LuantiServerRegistry::class)->query($this->actor()))->columns([
             TextColumn::make('name')->label('Name')->searchable()->sortable(),
-            TextColumn::make('domain')->label('Domain')->sortable(),
+            TextColumn::make('domain')->label('Domain')->placeholder('Noch nicht eingerichtet')->sortable(),
+            TextColumn::make('hetzner_status')->label('VM-Status')
+                ->getStateUsing(fn (LuantiServer $record): string => $record->hetznerStatusLabel()),
+            TextColumn::make('hetzner_server_id')->label('Hetzner-ID')->placeholder('–'),
+            TextColumn::make('hetzner_ipv4')->label('IPv4')->placeholder('–'),
+            TextColumn::make('hetzner_ipv6')->label('IPv6-Netz')->placeholder('–')->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('hetzner_error')->label('VM-Fehler')->placeholder('–')->wrap(),
+            TextColumn::make('luanti_installation_status')->label('Luanti-Installation')
+                ->getStateUsing(fn (LuantiServer $record): string => $record->installationStatusLabel()),
+            TextColumn::make('luanti_docker_image')->label('Luanti-Image')->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('luanti_engine_version')->label('Engine-Version')->placeholder('Noch nicht geprüft')->toggleable(),
+            TextColumn::make('luanti_verified_at')->label('Installation geprüft am')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('luanti_installation_error')->label('Installation/Prüfung')->wrap()->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('game_port')->label('Spiel-Port'),
             TextColumn::make('api_base_url')->label('HTTPS-API-URL')->placeholder('Nicht konfiguriert')->wrap(),
             IconColumn::make('has_api_token')->label('API-Token hinterlegt')
@@ -55,6 +95,41 @@ class LuantiServers extends AccessTablePage
             TextColumn::make('worlds_synced_at')->label('Weltvorlagen synchronisiert')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('Noch nicht synchronisiert'),
             TextColumn::make('world_sync_error')->label('Letzter Synchronisierungsfehler')->placeholder('–')->wrap(),
         ])->recordActions([
+            Action::make('verifyInstallation')->label('Installation prüfen')
+                ->visible(fn (LuantiServer $record): bool => $record->luanti_docker_image !== null
+                    && $record->provisioning_host_public_key !== null
+                    && in_array($record->hetzner_status, ['running', 'initializing', 'starting'], true))
+                ->action(function (LuantiServer $record): void {
+                    try {
+                        $result = app(LuantiDockerInstallation::class)->verify($this->actor(), $record);
+                    } catch (ValidationException $exception) {
+                        Notification::make()->title('Installation konnte nicht geprüft werden')
+                            ->body(collect($exception->errors())->flatten()->first())->danger()->send();
+
+                        return;
+                    }
+                    Notification::make()->title($result['title'])->body($result['body'])
+                        ->status($result['successful'] ? 'success' : 'warning')->send();
+                }),
+            Action::make('retryKeySetup')->label('VM-Einrichtung fortsetzen')
+                ->visible(fn (LuantiServer $record): bool => $record->hetzner_status === 'key_pending')
+                ->action(function (LuantiServer $record): void {
+                    $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->retryKeySetup($this->actor(), $record));
+                }),
+            Action::make('refreshVm')->label('VM-Status aktualisieren')
+                ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference !== null
+                    && ! in_array($record->hetzner_status, ['deleted', 'create_failed', 'key_pending'], true))
+                ->action(function (LuantiServer $record): void {
+                    $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->refresh($this->actor(), $record));
+                }),
+            Action::make('deleteVm')->label('Hetzner-VM löschen')->color('danger')->requiresConfirmation()
+                ->modalHeading('Hetzner-VM unwiderruflich löschen?')
+                ->modalDescription('Löscht die VM und ihre lokale Festplatte bei Hetzner. Alle Daten auf der VM gehen verloren. Der Portaleintrag bleibt zur Statusprüfung erhalten.')
+                ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference !== null
+                    && $record->hetzner_status !== 'deleted')
+                ->action(function (LuantiServer $record): void {
+                    $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->delete($this->actor(), $record));
+                }),
             Action::make('syncWorlds')->label('Weltvorlagen synchronisieren')
                 ->action(function (LuantiServer $record): void {
                     $this->notifyConnectionResult(app(LuantiWorldTemplateSynchronizer::class)->sync($this->actor(), $record));
@@ -79,6 +154,9 @@ class LuantiServers extends AccessTablePage
                 }),
             Action::make('delete')->label('Löschen')->color('danger')->requiresConfirmation()
                 ->modalHeading('Server löschen?')->modalDescription('Der Servereintrag und seine gespeicherten Zugangsdaten werden aus dem Portal entfernt.')
+                ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference === null
+                    || (in_array($record->hetzner_status, ['deleted', 'create_failed'], true)
+                        && $record->getRawOriginal('provisioning_private_key') === null))
                 ->action(function (LuantiServer $record): void {
                     try {
                         app(LuantiServerRegistry::class)->delete($this->actor(), $record);
@@ -90,6 +168,30 @@ class LuantiServers extends AccessTablePage
                     $this->saved('Server gelöscht');
                 }),
         ])->emptyStateHeading('Noch keine Luanti-Server');
+    }
+
+    /** @param Closure(): LuantiServer $operation */
+    private function performVmAction(Closure $operation): void
+    {
+        try {
+            $server = $operation();
+        } catch (ValidationException $exception) {
+            if (! isset($exception->errors()['hetzner'])) {
+                Notification::make()->title('VM-Eingaben prüfen')->body(collect($exception->errors())->flatten()->first())->danger()->send();
+                $statePath = $this->getMountedActionSchema()?->getStatePath();
+                throw ValidationException::withMessages(collect($exception->errors())->mapWithKeys(
+                    fn (array $messages, string $field): array => [filled($statePath) ? $statePath.'.'.$field : $field => $messages],
+                )->all());
+            }
+            Notification::make()->title('Hetzner-Anfrage nicht möglich')->body($exception->errors()['hetzner'][0])->danger()->send();
+
+            return;
+        }
+        Notification::make()->title($server->hetznerStatusLabel())
+            ->body($server->hetzner_error ?? ($server->hetzner_status === 'deleted'
+                ? 'Die VM wurde bei Hetzner gelöscht.' : ($server->hetzner_status === 'key_pending'
+                    ? 'Mit „VM-Einrichtung fortsetzen“ erneut versuchen.' : 'Mit „VM-Status aktualisieren“ den aktuellen Stand abrufen.')))
+            ->status($server->hetzner_error === null ? 'success' : 'warning')->send();
     }
 
     /** @return list<TextInput|Textarea|Actions> */

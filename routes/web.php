@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', fn () => redirect()->route('access'));
+Route::get('/admin/hetzner', fn () => redirect()->route('filament.admin.pages.einstellungen'));
 Route::get('/einladungen/{token}', InvitationController::class)->where('token', '[A-Za-z0-9]{64}')->middleware('throttle:30,1')->name('invitations.open');
 Route::get('/email-bestaetigen', fn () => redirect()->route('filament.portal.auth.email-verification.prompt'))->middleware('auth')->name('verification.notice');
 Route::get('/zugang', AccessPage::class)->middleware(['auth', EnsurePortalAccount::class, 'verified'])->name('access');

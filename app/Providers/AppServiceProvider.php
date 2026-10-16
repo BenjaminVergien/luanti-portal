@@ -9,6 +9,7 @@ use App\Services\CanonicalUrl;
 use Filament\Auth\Http\Responses\Contracts\LoginResponse;
 use Filament\Auth\Http\Responses\Contracts\RegistrationResponse;
 use Illuminate\Auth\Middleware\EnsureEmailIsVerified;
+use Illuminate\Foundation\Console\ServeCommand;
 use Illuminate\Foundation\DevCommands;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
@@ -35,6 +36,11 @@ class AppServiceProvider extends ServiceProvider
         URL::forceScheme(parse_url($origin, PHP_URL_SCHEME));
 
         Livewire::addPersistentMiddleware([EnsurePortalAccount::class, EnsureEmailIsVerified::class]);
+        if (PHP_OS_FAMILY === 'Windows') {
+            ServeCommand::$passthroughVariables = array_values(array_unique([
+                ...ServeCommand::$passthroughVariables, 'TEMP', 'TMP', 'PROGRAMDATA', 'ALLUSERSPROFILE',
+            ]));
+        }
         DevCommands::artisan('serve --host=127.0.0.1 --port=8000 --tries=1', 'server');
         DevCommands::artisan('schedule:work', 'scheduler');
     }
