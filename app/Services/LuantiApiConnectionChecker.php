@@ -6,14 +6,13 @@ use App\Models\LuantiServer;
 use App\Models\User;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Gate;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use SensitiveParameter;
 
 class LuantiApiConnectionChecker
 {
-    public function __construct(private PortalAccess $access) {}
+    public function __construct(private PortalAccess $access, private BridgeHttpClient $http) {}
 
     /**
      * @param  array{api_base_url?: mixed, api_token?: mixed}  $settings
@@ -52,8 +51,9 @@ class LuantiApiConnectionChecker
         }
 
         try {
-            $response = Http::withToken($token)->acceptJson()->connectTimeout(3)->timeout(8)
-                ->withoutRedirecting()->get(rtrim($baseUrl, '/').'/v1/lifecycle/jobs/connection-check-'.Str::uuid());
+            $response = $this->http->send('GET', rtrim($baseUrl, '/').'/v1/lifecycle/jobs/connection-check-'.Str::uuid(), $token, 8);
+        } catch (BridgeResponseTooLargeException) {
+            return $this->result('API-Antwort zu groß', 'Die Antwort der Bridge überschreitet die erlaubte Größe von 256 KiB.');
         } catch (ConnectionException) {
             return $this->result('API nicht erreichbar', 'Die Verbindung ist fehlgeschlagen. Bitte URL, Netzwerk und TLS-Zertifikat prüfen.');
         }

@@ -53,6 +53,10 @@ class LuantiApiConnectionCheckerTest extends TestCase
     public static function unsuccessfulResponses(): array
     {
         return [
+            'oversized success' => [200, str_repeat('x', 262145), 'API-Antwort zu groß'],
+            'oversized expected status' => [404, str_repeat('x', 262145), 'API-Antwort zu groß'],
+            'oversized unauthorized' => [401, str_repeat('x', 262145), 'API-Antwort zu groß'],
+            'oversized server error' => [500, str_repeat('x', 262145), 'API-Antwort zu groß'],
             '401 unauthorized' => [401, ['version' => 1, 'error' => ['code' => 'unauthorized']], 'API-Token abgelehnt'],
             '500 server error' => [500, 'private upstream error', 'API-Fehler'],
             '503 unavailable' => [503, ['version' => 1, 'error' => ['code' => 'state_unavailable']], 'API-Fehler'],

@@ -10,14 +10,13 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Validator;
 use JsonException;
 use stdClass;
 
 class LuantiWorldSynchronizer
 {
-    public function __construct(private PortalAccess $access) {}
+    public function __construct(private PortalAccess $access, private BridgeHttpClient $http) {}
 
     /** @return array{successful: bool, title: string, body: string} */
     public function sync(User $actor, LuantiServer $server): array
@@ -52,8 +51,10 @@ class LuantiWorldSynchronizer
             }
 
             try {
-                $response = Http::withToken($token)->acceptJson()->connectTimeout(3)->timeout(8)->withoutRedirecting()
-                    ->get(rtrim($baseUrl, '/').'/v1/worlds');
+                $response = $this->http->send('GET', rtrim($baseUrl, '/').'/v1/worlds', $token, 8);
+            } catch (BridgeResponseTooLargeException) {
+                return $this->failure($server, $actor, 'Weltliste zu groß',
+                    'Die Antwort der Bridge überschreitet die erlaubte Größe von 256 KiB. Die gespeicherte Weltliste bleibt erhalten.');
             } catch (ConnectionException) {
                 return $this->failure($server, $actor, 'Bridge nicht erreichbar',
                     'Welten konnten nicht geladen werden. Bitte Netzwerk, API-URL und TLS-Zertifikat prüfen.');
@@ -119,9 +120,6 @@ class LuantiWorldSynchronizer
     /** @return list<array{world_id: string, name: string}>|null */
     private function parseCatalogue(string $body): ?array
     {
-        if (strlen($body) > 256 * 1024) {
-            return null;
-        }
         try {
             $value = json_decode($body, flags: JSON_THROW_ON_ERROR);
         } catch (JsonException) {

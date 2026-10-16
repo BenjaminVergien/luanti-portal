@@ -16,7 +16,6 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -24,6 +23,8 @@ use Illuminate\Validation\ValidationException;
 
 class LuantiAccounts
 {
+    public function __construct(private BridgeHttpClient $http) {}
+
     public function authorize(User $actor, WorldRequest $request): void
     {
         Gate::forUser($actor)->authorize('manageAccounts', $request);
@@ -284,10 +285,13 @@ class LuantiAccounts
             }
             $url = $base.'/v1/worlds/'.rawurlencode($job->world_identifier).'/accounts/jobs';
             try {
-                $client = Http::withToken($server->api_token)->acceptJson()->connectTimeout(3)->timeout(10)->withoutRedirecting();
                 $response = $job->state === 'queued'
-                    ? $client->withBody($job->request_payload, 'application/json')->post($url)
-                    : $client->get($url.'/'.rawurlencode($job->job_id));
+                    ? $this->http->send('POST', $url, $server->api_token, 10, $job->request_payload)
+                    : $this->http->send('GET', $url.'/'.rawurlencode($job->job_id), $server->api_token, 10);
+            } catch (BridgeResponseTooLargeException) {
+                $this->unknown($job);
+
+                return;
             } catch (ConnectionException) {
                 $job->update(['error' => 'Bridge nicht erreichbar. Der bestehende Auftrag wird erneut geprüft.']);
 
@@ -308,7 +312,7 @@ class LuantiAccounts
 
                 return;
             }
-            $envelope = strlen($response->body()) <= 256 * 1024 ? $response->json() : null;
+            $envelope = $response->json();
             if (! is_array($envelope) || ($envelope['version'] ?? null) !== 1 || ($envelope['job_id'] ?? null) !== $job->job_id
                 || ($envelope['world_id'] ?? null) !== $job->world_identifier) {
                 $this->unknown($job);

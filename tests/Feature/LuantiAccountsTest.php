@@ -189,6 +189,54 @@ class LuantiAccountsTest extends TestCase
         $this->assertSame(2, LuantiAccountAssignment::query()->where('applied_admitted', true)->count());
     }
 
+    /** @return array<string, array{string, int}> */
+    public static function oversizedResponses(): array
+    {
+        $cases = [];
+        foreach (['queued', 'pending'] as $state) {
+            foreach ([200, 202, 400, 401, 404, 500] as $status) {
+                $cases[$state.' '.$status] = [$state, $status];
+            }
+        }
+
+        return $cases;
+    }
+
+    #[DataProvider('oversizedResponses')]
+    public function test_oversized_submission_and_polling_replies_preserve_jobs_until_manual_recovery(string $state, int $status): void
+    {
+        $job = $this->preparedJob();
+        $job->update(['state' => $state]);
+        $payload = $job->request_payload;
+        $assignments = LuantiAccountAssignment::query()->get()->map->getRawOriginal()->all();
+        $this->fakeHttp(['*' => Http::response(str_repeat('x', 262145).'private-test-token', $status, ['Content-Length' => '1'])]);
+        $accounts = app(LuantiAccounts::class);
+
+        $accounts->process($job->id);
+
+        $this->assertSame('unknown', $job->fresh()->state);
+        $this->assertSame($payload, $job->fresh()->request_payload);
+        $this->assertStringNotContainsString('private-test-token', $job->fresh()->error);
+        $this->assertSame($assignments, LuantiAccountAssignment::query()->get()->map->getRawOriginal()->all());
+        Http::assertSentCount(1);
+        Queue::fake();
+        (new ProcessLuantiAccounts($this->worldRequest->id))->handle($accounts);
+        Queue::assertNothingPushed();
+        $this->assertDatabaseCount('luanti_account_jobs', 1);
+        Http::assertSentCount(1);
+
+        $accounts->retry($this->actor, $this->worldRequest);
+        $this->fakeHttp(['*' => function (Request $request) use ($job): PromiseInterface {
+            $this->assertSame('GET', $request->method());
+            $this->assertStringEndsWith('/'.$job->job_id, $request->url());
+
+            return Http::response($this->completed($job));
+        }]);
+        $accounts->process($job->id);
+        $this->assertSame('completed', $job->fresh()->state);
+        $this->assertDatabaseCount('luanti_account_jobs', 1);
+    }
+
     public function test_failed_post_retries_identical_bytes_and_job_id_without_duplicate_jobs(): void
     {
         $job = $this->preparedJob();

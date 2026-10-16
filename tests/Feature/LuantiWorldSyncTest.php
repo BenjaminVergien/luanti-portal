@@ -147,6 +147,9 @@ class LuantiWorldSyncTest extends TestCase
             'duplicate ID' => [200, ['version' => 1, 'worlds' => [['world_id' => 'dev', 'name' => 'One'], ['world_id' => 'dev', 'name' => 'Two']]]],
             'partial malformed list' => [200, ['version' => 1, 'worlds' => [['world_id' => 'new', 'name' => 'One'], null]]],
             'oversized response' => [200, str_repeat('x', 256 * 1024 + 1)],
+            'oversized unauthorized' => [401, str_repeat('x', 256 * 1024 + 1)],
+            'oversized not found' => [404, str_repeat('x', 256 * 1024 + 1)],
+            'oversized server error' => [500, str_repeat('x', 256 * 1024 + 1)],
             'unauthorized' => [401, ['private' => 'remote secret']],
             'endpoint absent' => [404, ['private' => 'remote secret']],
             'remote failure' => [503, ['private' => 'remote secret']],
@@ -302,7 +305,7 @@ class LuantiWorldSyncTest extends TestCase
 
     public function test_admin_sync_actions_store_maps_and_make_them_selectable_in_request_form(): void
     {
-        Http::fake(['*' => Http::response($this->catalogue())]);
+        Http::fake(fn (): PromiseInterface => Http::response($this->catalogue()));
         $this->panel($this->admin);
         Livewire::test(LuantiServers::class)->callAction(TestAction::make('syncWorlds')->table($this->server))
             ->assertNotified('Welten synchronisiert')->assertDontSee('private-test-token');
@@ -320,7 +323,7 @@ class LuantiWorldSyncTest extends TestCase
 
     public function test_synced_map_name_and_hidden_setting_remain_editable_but_identity_is_protected(): void
     {
-        Http::fake(['*' => Http::response($this->catalogue())]);
+        Http::fake(fn (): PromiseInterface => Http::response($this->catalogue()));
         app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server);
         $world = $this->server->worlds()->where('world_identifier', 'dev')->sole();
         $this->panel($this->admin);
