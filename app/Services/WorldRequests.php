@@ -8,7 +8,9 @@ use App\Models\LuantiWorld;
 use App\Models\Organization;
 use App\Models\User;
 use App\Models\WorldRequest;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Validator;
@@ -84,22 +86,33 @@ class WorldRequests
 
     public function decide(User $actor, WorldRequest $request, bool $approve, int $expectedRevision): void
     {
-        DB::transaction(function () use ($actor, $request, $approve, $expectedRevision): void {
-            $request = WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
-            $actor = $this->access->currentUser($actor);
-            Gate::forUser($actor)->authorize('decide', $request);
-            $this->checkRevision($request, $expectedRevision);
-            if ($approve) {
-                $this->checkWorld($request->luanti_world_id, requireSelectable: true);
-                app(LuantiAccounts::class)->reserveApprovedWorld($request);
-                $request->forceFill(['approved_access' => app(LuantiAccounts::class)->snapshot($request)]);
-            }
-            $request->forceFill(['status' => $approve ? WorldRequestStatus::Approved : WorldRequestStatus::Rejected,
-                'decided_by' => $actor->id, 'decided_at' => now(), 'revision' => $request->revision + 1])->save();
-            if ($approve && $request->luantiAccounts()->exists()) {
-                ProcessLuantiAccounts::dispatch($request->id)->afterCommit();
-            }
-        });
+        try {
+            $shouldProcessAccounts = Cache::lock('luanti:accounts:process:'.$request->id, 60)->block(15, function () use ($actor, $request, $approve, $expectedRevision): bool {
+                return DB::transaction(function () use ($actor, $request, $approve, $expectedRevision): bool {
+                    $request = WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
+                    $actor = $this->access->currentUser($actor);
+                    Gate::forUser($actor)->authorize('decide', $request);
+                    $this->checkRevision($request, $expectedRevision);
+                    if ($approve) {
+                        $this->checkWorld($request->luanti_world_id, requireSelectable: true);
+                        app(LuantiAccounts::class)->reserveApprovedWorld($request);
+                        $request->forceFill(['approved_access' => app(LuantiAccounts::class)->snapshot($request)]);
+                    }
+                    $request->forceFill(['status' => $approve ? WorldRequestStatus::Approved : WorldRequestStatus::Rejected,
+                        'decided_by' => $actor->id, 'decided_at' => now(), 'revision' => $request->revision + 1])->save();
+                    if ($approve) {
+                        app(LuantiAccounts::class)->cancelSupersededUnsentJobs($request);
+                    }
+
+                    return $approve && $request->luantiAccounts()->exists();
+                });
+            });
+        } catch (LockTimeoutException) {
+            throw ValidationException::withMessages(['revision' => 'Spielaccounts werden gerade übertragen. Bitte versuche die Entscheidung in wenigen Sekunden erneut.']);
+        }
+        if ($shouldProcessAccounts) {
+            ProcessLuantiAccounts::dispatch($request->id)->afterCommit();
+        }
     }
 
     private function checkRevision(WorldRequest $request, int $expectedRevision): void

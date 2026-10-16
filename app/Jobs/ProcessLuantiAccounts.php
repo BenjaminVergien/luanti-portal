@@ -32,7 +32,10 @@ class ProcessLuantiAccounts implements ShouldBeUniqueUntilProcessing, ShouldQueu
         $job = LuantiAccountJob::query()->where('world_request_id', $this->requestId)->whereIn('state', ['queued', 'pending'])->first();
         if ($job !== null) {
             $accounts->process($job->id);
-            if ($job->fresh()->state !== 'unknown') {
+            $state = $job->fresh()->state;
+            if (in_array($state, ['completed', 'cancelled'], true)) {
+                self::dispatch($this->requestId);
+            } elseif (in_array($state, ['queued', 'pending'], true)) {
                 self::dispatch($this->requestId)->delay(now()->addSeconds(30));
             }
         }

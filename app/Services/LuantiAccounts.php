@@ -163,13 +163,14 @@ class LuantiAccounts
     {
         DB::transaction(function () use ($requestId): void {
             $request = WorldRequest::query()->whereKey($requestId)->lockForUpdate()->firstOrFail();
-            if (LuantiAccountJob::query()->where('world_request_id', $requestId)->whereIn('state', ['queued', 'pending', 'unknown'])->exists()) {
-                return;
-            }
             $desired = $request->approved_access;
             if ($desired === null && $request->status === WorldRequestStatus::Approved) {
                 $desired = $this->snapshot($request);
                 $request->forceFill(['approved_access' => $desired])->save();
+            }
+            $this->cancelSupersededUnsentJobs($request);
+            if (LuantiAccountJob::query()->where('world_request_id', $requestId)->whereIn('state', ['queued', 'pending', 'unknown'])->exists()) {
+                return;
             }
             if ($desired === null) {
                 return;
@@ -177,10 +178,7 @@ class LuantiAccounts
             $window = ['starts_at' => $desired['starts_at'], 'ends_at' => $desired['ends_at']];
             $accounts = LuantiAccount::query()->where('world_request_id', $requestId)->with('assignments')->orderBy('id')->get();
             $assignments = $accounts->flatMap->assignments;
-            if ($assignments->contains(fn (LuantiAccountAssignment $assignment): bool => $assignment->error !== null)) {
-                return;
-            }
-            $old = $assignments->filter(fn (LuantiAccountAssignment $assignment): bool => $assignment->applied_admitted
+            $old = $assignments->filter(fn (LuantiAccountAssignment $assignment): bool => $assignment->error === null && $assignment->applied_admitted
                 && ($assignment->luanti_world_id !== $desired['world_id'] || $assignment->applied_window !== $window));
             if ($old->isNotEmpty()) {
                 $worldId = $old->first()->luanti_world_id;
@@ -189,6 +187,9 @@ class LuantiAccounts
                     'account' => $accounts->firstWhere('id', $assignment->luanti_account_id), 'window' => $assignment->applied_window,
                 ])->values()->all());
 
+                return;
+            }
+            if ($assignments->contains(fn (LuantiAccountAssignment $assignment): bool => $assignment->error !== null)) {
                 return;
             }
             $world = LuantiWorld::query()->whereKey($desired['world_id'])->lockForUpdate()->firstOrFail();
@@ -213,6 +214,15 @@ class LuantiAccounts
                 $this->makeJob($request, $world->id, 'grant', $desired['generation'], $batch);
             }
         });
+    }
+
+    /** The caller must hold the world request's database row lock. */
+    public function cancelSupersededUnsentJobs(WorldRequest $request): void
+    {
+        $generation = $request->approved_access['generation'] ?? null;
+        LuantiAccountJob::query()->where('world_request_id', $request->id)->where('state', 'queued')->whereNull('submitted_at')
+            ->when($generation !== null, fn (Builder $query): Builder => $query->where('generation', '<>', $generation))
+            ->update(['state' => 'cancelled', 'error' => null]);
     }
 
     private function reserve(LuantiAccount $account, int $worldId): bool
@@ -268,22 +278,39 @@ class LuantiAccounts
     {
         $job = LuantiAccountJob::query()->findOrFail($jobId);
         Cache::lock('luanti:accounts:process:'.$job->world_request_id, 60)->get(function () use ($job): void {
-            $job = $job->fresh();
-            if (! in_array($job->state, ['queued', 'pending'], true)) {
+            $job = DB::transaction(function () use ($job): ?LuantiAccountJob {
+                $request = WorldRequest::query()->whereKey($job->world_request_id)->lockForUpdate()->firstOrFail();
+                $this->cancelSupersededUnsentJobs($request);
+                $job = $job->fresh();
+                if (! in_array($job->state, ['queued', 'pending'], true)) {
+                    return null;
+                }
+                $server = $job->world->server;
+                $base = rtrim((string) $server->api_base_url, '/');
+                $parts = parse_url($base);
+                if ($parts === false || ($parts['scheme'] ?? null) !== 'https' || ! isset($parts['host'])
+                    || array_intersect(['user', 'pass', 'query', 'fragment'], array_keys($parts)) !== []
+                    || $base !== $job->base_url || ! is_string($server->api_token) || $server->api_token === ''
+                    || preg_match('/[\\r\\n]/', $server->api_token)) {
+                    $job->update(['error' => 'HTTPS-API-Konfiguration fehlt oder wurde geändert.']);
+
+                    return null;
+                }
+                if ($job->state === 'queued') {
+                    if ($job->generation !== ($request->approved_access['generation'] ?? null)) {
+                        $job->update(['state' => 'pending']);
+                    } elseif ($job->submitted_at === null) {
+                        $job->update(['submitted_at' => now()]);
+                    }
+                }
+
+                return $job;
+            });
+            if ($job === null) {
                 return;
             }
             $server = $job->world->server;
-            $base = rtrim((string) $server->api_base_url, '/');
-            $parts = parse_url($base);
-            if ($parts === false || ($parts['scheme'] ?? null) !== 'https' || ! isset($parts['host'])
-                || array_intersect(['user', 'pass', 'query', 'fragment'], array_keys($parts)) !== []
-                || $base !== $job->base_url || ! is_string($server->api_token) || $server->api_token === ''
-                || preg_match('/[\\r\\n]/', $server->api_token)) {
-                $job->update(['error' => 'HTTPS-API-Konfiguration fehlt oder wurde geändert.']);
-
-                return;
-            }
-            $url = $base.'/v1/worlds/'.rawurlencode($job->world_identifier).'/accounts/jobs';
+            $url = $job->base_url.'/v1/worlds/'.rawurlencode($job->world_identifier).'/accounts/jobs';
             try {
                 $response = $job->state === 'queued'
                     ? $this->http->send('POST', $url, $server->api_token, 10, $job->request_payload)
@@ -380,7 +407,7 @@ class LuantiAccounts
                 ...($outcome['status'] === 'rejected' ? ['code' => $this->safeCode($outcome['code'] ?? null)] : [])];
         }
         DB::transaction(function () use ($job, $payload, $safeResults, $result): void {
-            WorldRequest::query()->whereKey($job->world_request_id)->lockForUpdate()->firstOrFail();
+            $request = WorldRequest::query()->whereKey($job->world_request_id)->lockForUpdate()->firstOrFail();
             foreach ($safeResults as $index => $outcome) {
                 $assignment = LuantiAccountAssignment::query()->where('luanti_world_id', $job->luanti_world_id)
                     ->where('luanti_account_id', $job->account_ids[$index])->firstOrFail();
@@ -401,7 +428,8 @@ class LuantiAccounts
                 }
             }
             $job->update(['state' => 'completed', 'error' => null,
-                'result' => ['version' => 2, 'job_id' => $job->job_id, 'status' => $result['status'], 'accounts' => $safeResults]]);
+                'result' => ['version' => 2, 'job_id' => $job->job_id, 'status' => $result['status'], 'accounts' => $safeResults,
+                    'superseded' => $job->generation !== ($request->approved_access['generation'] ?? null)]]);
         });
     }
 
