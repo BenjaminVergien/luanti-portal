@@ -3,14 +3,14 @@
 namespace Tests\Feature;
 
 use App\Filament\Pages\LuantiServers;
-use App\Filament\Pages\LuantiWorlds;
+use App\Filament\Pages\LuantiWorldTemplates;
 use App\Models\LuantiServer;
-use App\Models\LuantiWorld;
+use App\Models\LuantiWorldTemplate;
 use App\Models\User;
 use App\Models\WorldRequest;
 use App\Services\LuantiServerRegistry;
-use App\Services\LuantiWorldRegistry;
-use Database\Seeders\LuantiWorldSeeder;
+use App\Services\LuantiWorldTemplateRegistry;
+use Database\Seeders\LuantiWorldTemplateSeeder;
 use Database\Seeders\WorldRequestSeeder;
 use Filament\Actions\Testing\TestAction;
 use Filament\Facades\Filament;
@@ -22,7 +22,7 @@ use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Tests\TestCase;
 
-class LuantiWorldsTest extends TestCase
+class LuantiWorldTemplatesTest extends TestCase
 {
     use RefreshDatabase;
 
@@ -40,14 +40,14 @@ class LuantiWorldsTest extends TestCase
         $this->panel(User::factory()->globalAdmin()->create());
         $server = LuantiServer::factory()->create(['api_token' => 'private-token']);
         $this->get('/admin/welten')->assertOk();
-        $page = Livewire::test(LuantiWorlds::class)->callAction('create', [
-            'luanti_server_id' => $server->id, 'name' => ' Jugendwelt ', 'world_identifier' => ' youth ', 'is_selectable' => true,
+        $page = Livewire::test(LuantiWorldTemplates::class)->callAction('create', [
+            'luanti_server_id' => $server->id, 'name' => ' Jugendwelt ', 'template_identifier' => ' youth ', 'is_selectable' => true,
         ])->assertHasNoActionErrors()->assertNotified('Welt angelegt')->assertDontSee('private-token');
-        $world = LuantiWorld::query()->sole();
+        $world = LuantiWorldTemplate::query()->sole();
         $this->assertSame('Jugendwelt', $world->name);
-        $this->assertSame('youth', $world->world_identifier);
+        $this->assertSame('youth', $world->template_identifier);
         $this->assertTrue($world->is_selectable);
-        $other = LuantiWorld::factory()->create(['name' => 'Andere Welt']);
+        $other = LuantiWorldTemplate::factory()->create(['name' => 'Andere Welt']);
         $page->searchTable('Jugendwelt')->assertCanSeeTableRecords([$world])->assertCanNotSeeTableRecords([$other]);
         $page->callAction(TestAction::make('edit')->table($world), ['is_selectable' => false])
             ->assertHasNoActionErrors()->assertNotified('Gespeichert');
@@ -55,32 +55,32 @@ class LuantiWorldsTest extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_world_identifiers_are_unique_per_server_but_reusable_on_other_servers(): void
+    public function test_template_identifiers_are_unique_per_server_but_reusable_on_other_servers(): void
     {
         $admin = User::factory()->globalAdmin()->create();
-        $registry = app(LuantiWorldRegistry::class);
-        $world = LuantiWorld::factory()->create(['world_identifier' => 'dev']);
-        $data = $world->only(['luanti_server_id', 'name', 'world_identifier', 'is_selectable']);
+        $registry = app(LuantiWorldTemplateRegistry::class);
+        $world = LuantiWorldTemplate::factory()->create(['template_identifier' => 'dev']);
+        $data = $world->only(['luanti_server_id', 'name', 'template_identifier', 'is_selectable']);
         $registry->create($admin, [...$data, 'luanti_server_id' => LuantiServer::factory()->create()->id]);
         try {
             $registry->create($admin, $data);
             $this->fail('Expected duplicate validation failure.');
         } catch (ValidationException $exception) {
-            $this->assertArrayHasKey('world_identifier', $exception->errors());
+            $this->assertArrayHasKey('template_identifier', $exception->errors());
         }
-        $this->assertDatabaseCount('luanti_worlds', 2);
+        $this->assertDatabaseCount('luanti_world_templates', 2);
     }
 
     public function test_catalogue_rejects_invalid_names_identifiers_servers_and_flags(): void
     {
         $this->panel(User::factory()->globalAdmin()->create());
-        Livewire::test(LuantiWorlds::class)->callAction('create')->assertHasActionErrors([
-            'name' => 'required', 'luanti_server_id' => 'required', 'world_identifier' => 'required',
+        Livewire::test(LuantiWorldTemplates::class)->callAction('create')->assertHasActionErrors([
+            'name' => 'required', 'luanti_server_id' => 'required', 'template_identifier' => 'required',
         ]);
-        $this->assertDatabaseCount('luanti_worlds', 0);
+        $this->assertDatabaseCount('luanti_world_templates', 0);
         $this->expectException(ValidationException::class);
-        app(LuantiWorldRegistry::class)->create(auth()->user(), ['luanti_server_id' => 999999,
-            'name' => ' ', 'world_identifier' => '', 'is_selectable' => 'invalid']);
+        app(LuantiWorldTemplateRegistry::class)->create(auth()->user(), ['luanti_server_id' => 999999,
+            'name' => ' ', 'template_identifier' => '', 'is_selectable' => 'invalid']);
     }
 
     public function test_caseworkers_and_members_cannot_access_or_modify_catalogue(): void
@@ -89,10 +89,10 @@ class LuantiWorldsTest extends TestCase
             $this->panel($actor);
             $this->get('/admin/welten')->assertForbidden();
             try {
-                app(LuantiWorldRegistry::class)->create($actor, []);
+                app(LuantiWorldTemplateRegistry::class)->create($actor, []);
                 $this->fail('Expected authorization failure.');
             } catch (AuthorizationException $exception) {
-                $this->assertDatabaseCount('luanti_worlds', 0);
+                $this->assertDatabaseCount('luanti_world_templates', 0);
             }
         }
     }
@@ -101,8 +101,8 @@ class LuantiWorldsTest extends TestCase
     {
         $admin = User::factory()->globalAdmin()->create();
         $this->panel($admin);
-        $world = LuantiWorld::factory()->create();
-        $page = Livewire::test(LuantiWorlds::class)->mountAction(TestAction::make('edit')->table($world))->fillForm(['name' => 'Unauthorized']);
+        $world = LuantiWorldTemplate::factory()->create();
+        $page = Livewire::test(LuantiWorldTemplates::class)->mountAction(TestAction::make('edit')->table($world))->fillForm(['name' => 'Unauthorized']);
         $admin->forceFill(['internal_role' => null])->save();
         $page->call('callMountedAction')->assertForbidden();
         $this->assertNotSame('Unauthorized', $world->fresh()->name);
@@ -110,26 +110,26 @@ class LuantiWorldsTest extends TestCase
 
     public function test_referenced_world_identity_cannot_change_but_name_and_selectability_can(): void
     {
-        $world = LuantiWorld::factory()->create();
-        $request = WorldRequest::factory()->create(['luanti_world_id' => $world->id]);
+        $world = LuantiWorldTemplate::factory()->create();
+        $request = WorldRequest::factory()->create(['luanti_world_template_id' => $world->id]);
         $admin = User::factory()->globalAdmin()->create();
-        $data = $world->only(['luanti_server_id', 'name', 'world_identifier', 'is_selectable']);
-        app(LuantiWorldRegistry::class)->update($admin, $world, [...$data, 'name' => 'Updated', 'is_selectable' => false]);
-        $this->assertSame($world->id, $request->fresh()->luanti_world_id);
+        $data = $world->only(['luanti_server_id', 'name', 'template_identifier', 'is_selectable']);
+        app(LuantiWorldTemplateRegistry::class)->update($admin, $world, [...$data, 'name' => 'Updated', 'is_selectable' => false]);
+        $this->assertSame($world->id, $request->fresh()->luanti_world_template_id);
         $this->assertFalse($world->fresh()->is_selectable);
-        foreach (['world_identifier' => 'replacement', 'luanti_server_id' => LuantiServer::factory()->create()->id] as $field => $value) {
+        foreach (['template_identifier' => 'replacement', 'luanti_server_id' => LuantiServer::factory()->create()->id] as $field => $value) {
             try {
-                app(LuantiWorldRegistry::class)->update($admin, $world, [...$data, $field => $value]);
+                app(LuantiWorldTemplateRegistry::class)->update($admin, $world, [...$data, $field => $value]);
                 $this->fail('Expected identity protection.');
             } catch (ValidationException $exception) {
-                $this->assertArrayHasKey('world_identifier', $exception->errors());
+                $this->assertArrayHasKey('template_identifier', $exception->errors());
             }
         }
     }
 
     public function test_servers_with_catalogue_worlds_cannot_be_deleted_and_ui_explains_why(): void
     {
-        $world = LuantiWorld::factory()->create();
+        $world = LuantiWorldTemplate::factory()->create();
         $admin = User::factory()->globalAdmin()->create();
         $this->panel($admin);
         Livewire::test(LuantiServers::class)->callAction(TestAction::make('delete')->table($world->server))
@@ -149,14 +149,14 @@ class LuantiWorldsTest extends TestCase
     public function test_optional_example_seeders_are_idempotent_and_never_run_in_production(): void
     {
         $this->app->detectEnvironment(fn (): string => 'local');
-        $this->seed(LuantiWorldSeeder::class);
-        $this->seed(LuantiWorldSeeder::class);
+        $this->seed(LuantiWorldTemplateSeeder::class);
+        $this->seed(LuantiWorldTemplateSeeder::class);
         $this->seed(WorldRequestSeeder::class);
-        $this->assertDatabaseCount('luanti_worlds', 1);
+        $this->assertDatabaseCount('luanti_world_templates', 1);
         $this->assertDatabaseCount('luanti_servers', 1);
         $this->assertDatabaseCount('world_requests', 0);
         $this->app->detectEnvironment(fn (): string => 'production');
         $this->expectException(\RuntimeException::class);
-        $this->app->make(LuantiWorldSeeder::class)->run();
+        $this->app->make(LuantiWorldTemplateSeeder::class)->run();
     }
 }

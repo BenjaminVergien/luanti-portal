@@ -18,6 +18,6 @@ class LuantiAccountSeeder extends Seeder
         }
         $account = LuantiAccount::factory()->create();
         LuantiAccountAssignment::factory()->create(['luanti_account_id' => $account->id,
-            'luanti_world_id' => $account->worldRequest->luanti_world_id]);
+            'luanti_game_instance_id' => $account->worldRequest->current_game_instance_id]);
     }
 }

@@ -4,7 +4,7 @@ namespace Tests\Feature;
 
 use App\Enums\WorldRequestStatus;
 use App\Filament\Pages\WorldRequests;
-use App\Models\LuantiWorld;
+use App\Models\LuantiWorldTemplate;
 use App\Models\Organization;
 use App\Models\OrganizationMembership;
 use App\Models\User;
@@ -30,7 +30,7 @@ class WorldRequestsInterfaceTest extends TestCase
 
     private User $member;
 
-    private LuantiWorld $world;
+    private LuantiWorldTemplate $world;
 
     protected function setUp(): void
     {
@@ -43,7 +43,7 @@ class WorldRequestsInterfaceTest extends TestCase
             OrganizationMembership::factory()->create(['organization_id' => $this->organization->id, 'user_id' => $user->id]);
         }
         OrganizationMembership::factory()->manager()->create(['organization_id' => $this->organization->id, 'user_id' => $this->manager->id]);
-        $this->world = LuantiWorld::factory()->create();
+        $this->world = LuantiWorldTemplate::factory()->create();
         Http::preventStrayRequests();
     }
 
@@ -55,10 +55,10 @@ class WorldRequestsInterfaceTest extends TestCase
         Filament::setTenant($id === 'portal' ? $this->organization : null);
     }
 
-    /** @return array{name: string, luanti_world_id: int, start_date: string, end_date: string, participant_count: int} */
+    /** @return array{name: string, luanti_world_template_id: int, start_date: string, end_date: string, participant_count: int} */
     private function data(): array
     {
-        return ['name' => 'Jugendtreff', 'luanti_world_id' => $this->world->id,
+        return ['name' => 'Jugendtreff', 'luanti_world_template_id' => $this->world->id,
             'start_date' => now('Europe/Berlin')->toDateString(), 'end_date' => now('Europe/Berlin')->addDays(7)->toDateString(),
             'participant_count' => 12];
     }
@@ -108,7 +108,7 @@ class WorldRequestsInterfaceTest extends TestCase
     {
         $this->panel($this->applicant);
         $page = Livewire::test(WorldRequests::class)->callAction('create')->assertHasActionErrors([
-            'name' => 'required', 'luanti_world_id' => 'required', 'start_date' => 'required',
+            'name' => 'required', 'luanti_world_template_id' => 'required', 'start_date' => 'required',
             'end_date' => 'required', 'participant_count' => 'required',
         ]);
         $page->fillForm([...$this->data(), 'end_date' => now('Europe/Berlin')->subDay()->toDateString(), 'participant_count' => 0])
@@ -206,9 +206,9 @@ class WorldRequestsInterfaceTest extends TestCase
         $this->world->update(['is_selectable' => false]);
         $this->panel($this->applicant);
         Livewire::test(WorldRequests::class)->mountAction(TestAction::make('edit')->table($request))
-            ->assertActionDataSet(['luanti_world_id' => $this->world->id])->assertMountedActionModalSee('Nicht mehr beantragbar')
+            ->assertActionDataSet(['luanti_world_template_id' => $this->world->id])->assertMountedActionModalSee('Nicht mehr beantragbar')
             ->fillForm(['participant_count' => 20])->callMountedAction()->assertHasNoActionErrors();
-        Livewire::test(WorldRequests::class)->callAction('create', $this->data())->assertHasActionErrors(['luanti_world_id']);
+        Livewire::test(WorldRequests::class)->callAction('create', $this->data())->assertHasActionErrors(['luanti_world_template_id']);
     }
 
     public static function revocations(): array

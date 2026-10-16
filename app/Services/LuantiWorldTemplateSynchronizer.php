@@ -3,7 +3,7 @@
 namespace App\Services;
 
 use App\Models\LuantiServer;
-use App\Models\LuantiWorld;
+use App\Models\LuantiWorldTemplate;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Client\ConnectionException;
@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Validator;
 use JsonException;
 use stdClass;
 
-class LuantiWorldSynchronizer
+class LuantiWorldTemplateSynchronizer
 {
     public function __construct(private PortalAccess $access, private BridgeHttpClient $http) {}
 
@@ -51,7 +51,7 @@ class LuantiWorldSynchronizer
             }
 
             try {
-                $response = $this->http->send('GET', rtrim($baseUrl, '/').'/v1/worlds', $token, 8);
+                $response = $this->http->send('GET', rtrim($baseUrl, '/').'/v1/world-templates', $token, 8);
             } catch (BridgeResponseTooLargeException) {
                 return $this->failure($server, $actor, 'Weltliste zu groß',
                     'Die Antwort der Bridge überschreitet die erlaubte Größe von 256 KiB. Die gespeicherte Weltliste bleibt erhalten.');
@@ -83,17 +83,17 @@ class LuantiWorldSynchronizer
                 $created = 0;
                 $now = now();
                 foreach ($worlds as $entry) {
-                    $world = LuantiWorld::query()->firstOrNew([
-                        'luanti_server_id' => $current->id, 'world_identifier' => $entry['world_id'],
+                    $world = LuantiWorldTemplate::query()->firstOrNew([
+                        'luanti_server_id' => $current->id, 'template_identifier' => $entry['template_id'],
                     ]);
                     if (! $world->exists) {
                         $world->fill(['name' => $entry['name'], 'is_selectable' => true]);
                         $created++;
                     }
-                    $world->forceFill(['is_available' => true, 'last_discovered_at' => $now])->save();
+                    $world->forceFill(['is_available' => true, 'last_discovered_at' => $now, 'revision' => $entry['revision']])->save();
                     $seen[] = $world->id;
                 }
-                $missing = $current->worlds()->whereNotNull('last_discovered_at')->where('is_available', true)
+                $missing = $current->templates()->whereNotNull('last_discovered_at')->where('is_available', true)
                     ->whereNotIn('id', $seen)->update(['is_available' => false, 'updated_at' => $now]);
                 $current->forceFill(['worlds_synced_at' => $now, 'world_sync_error' => null])->save();
 
@@ -117,7 +117,7 @@ class LuantiWorldSynchronizer
             && array_intersect(['user', 'pass', 'query', 'fragment'], array_keys($parts)) === [];
     }
 
-    /** @return list<array{world_id: string, name: string}>|null */
+    /** @return list<array{template_id: string, name: string, revision: string}>|null */
     private function parseCatalogue(string $body): ?array
     {
         try {
@@ -126,20 +126,21 @@ class LuantiWorldSynchronizer
             return null;
         }
         if (! $value instanceof stdClass || ($value->version ?? null) !== 1
-            || ! isset($value->worlds) || ! is_array($value->worlds) || count($value->worlds) > 1000) {
+            || ! isset($value->templates) || ! is_array($value->templates) || count($value->templates) > 1000) {
             return null;
         }
         $worlds = [];
         $seen = [];
-        foreach ($value->worlds as $entry) {
-            if (! $entry instanceof stdClass || ! is_string($entry->world_id ?? null)
-                || ! preg_match('/\\A[A-Za-z0-9_-]{1,32}\\z/', $entry->world_id)
+        foreach ($value->templates as $entry) {
+            if (! $entry instanceof stdClass || ! is_string($entry->template_id ?? null)
+                || ! preg_match('/\\A[A-Za-z0-9_-]{1,32}\\z/', $entry->template_id)
+                || ! is_string($entry->revision ?? null) || ! preg_match('/\A[0-9a-f]{64}\z/', $entry->revision)
                 || ! is_string($entry->name ?? null) || trim($entry->name) === '' || mb_strlen($entry->name) > 255
-                || isset($seen[$entry->world_id])) {
+                || isset($seen[$entry->template_id])) {
                 return null;
             }
-            $seen[$entry->world_id] = true;
-            $worlds[] = ['world_id' => $entry->world_id, 'name' => trim($entry->name)];
+            $seen[$entry->template_id] = true;
+            $worlds[] = ['template_id' => $entry->template_id, 'name' => trim($entry->name), 'revision' => $entry->revision];
         }
 
         return $worlds;

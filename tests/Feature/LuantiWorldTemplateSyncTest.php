@@ -4,16 +4,16 @@ namespace Tests\Feature;
 
 use App\Enums\WorldRequestStatus;
 use App\Filament\Pages\LuantiServers;
-use App\Filament\Pages\LuantiWorlds;
+use App\Filament\Pages\LuantiWorldTemplates;
 use App\Filament\Pages\WorldRequests as WorldRequestsPage;
 use App\Models\LuantiServer;
-use App\Models\LuantiWorld;
+use App\Models\LuantiWorldTemplate;
 use App\Models\Organization;
 use App\Models\OrganizationMembership;
 use App\Models\User;
 use App\Models\WorldRequest;
-use App\Services\LuantiWorldRegistry;
-use App\Services\LuantiWorldSynchronizer;
+use App\Services\LuantiWorldTemplateRegistry;
+use App\Services\LuantiWorldTemplateSynchronizer;
 use App\Services\WorldRequests;
 use Filament\Actions\Testing\TestAction;
 use Filament\Facades\Filament;
@@ -30,7 +30,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\TestCase;
 
-class LuantiWorldSyncTest extends TestCase
+class LuantiWorldTemplateSyncTest extends TestCase
 {
     use RefreshDatabase;
 
@@ -50,9 +50,9 @@ class LuantiWorldSyncTest extends TestCase
     /** @return array{version: int, worlds: list<array{world_id: string, name: string}>} */
     private function catalogue(): array
     {
-        return ['version' => 1, 'worlds' => [
-            ['world_id' => 'dev', 'name' => 'Entwicklungskarte'],
-            ['world_id' => 'test', 'name' => 'Testkarte'],
+        return ['version' => 1, 'templates' => [
+            ['template_id' => 'dev', 'revision' => str_repeat('a', 64), 'name' => 'Entwicklungskarte'],
+            ['template_id' => 'test', 'revision' => str_repeat('a', 64), 'name' => 'Testkarte'],
         ]];
     }
 
@@ -66,7 +66,7 @@ class LuantiWorldSyncTest extends TestCase
 
     public function test_sync_imports_saved_maps_using_one_secure_get_and_is_idempotent(): void
     {
-        Http::fake(['https://bridge.example.test/prefix/v1/worlds' => function (Request $request, array $options): PromiseInterface {
+        Http::fake(['https://bridge.example.test/prefix/v1/world-templates' => function (Request $request, array $options): PromiseInterface {
             $this->assertSame(3, $options['connect_timeout']);
             $this->assertSame(8, $options['timeout']);
             $this->assertFalse($options['allow_redirects']);
@@ -78,13 +78,13 @@ class LuantiWorldSyncTest extends TestCase
 
             return Http::response($this->catalogue());
         }]);
-        $service = app(LuantiWorldSynchronizer::class);
+        $service = app(LuantiWorldTemplateSynchronizer::class);
         $this->assertTrue($service->sync($this->admin, $this->server)['successful']);
-        $ids = $this->server->worlds()->orderBy('world_identifier')->pluck('id')->all();
+        $ids = $this->server->templates()->orderBy('template_identifier')->pluck('id')->all();
         $this->assertTrue($service->sync($this->admin, $this->server)['successful']);
-        $this->assertSame($ids, $this->server->worlds()->orderBy('world_identifier')->pluck('id')->all());
-        $this->assertDatabaseCount('luanti_worlds', 2);
-        foreach ($this->server->worlds as $world) {
+        $this->assertSame($ids, $this->server->templates()->orderBy('template_identifier')->pluck('id')->all());
+        $this->assertDatabaseCount('luanti_world_templates', 2);
+        foreach ($this->server->templates as $world) {
             $this->assertTrue($world->is_available);
             $this->assertTrue($world->is_selectable);
             $this->assertNotNull($world->last_discovered_at);
@@ -96,56 +96,56 @@ class LuantiWorldSyncTest extends TestCase
 
     public function test_sync_preserves_manual_names_hidden_flags_and_other_servers(): void
     {
-        $existing = LuantiWorld::factory()->create(['luanti_server_id' => $this->server->id,
-            'world_identifier' => 'dev', 'name' => 'Unser Kartenname', 'is_selectable' => false]);
-        $manual = LuantiWorld::factory()->create(['luanti_server_id' => $this->server->id]);
-        $otherServer = LuantiWorld::factory()->create(['world_identifier' => 'test']);
+        $existing = LuantiWorldTemplate::factory()->create(['luanti_server_id' => $this->server->id,
+            'template_identifier' => 'dev', 'name' => 'Unser Kartenname', 'is_selectable' => false]);
+        $manual = LuantiWorldTemplate::factory()->create(['luanti_server_id' => $this->server->id]);
+        $otherServer = LuantiWorldTemplate::factory()->create(['template_identifier' => 'test']);
         Http::fake(['*' => Http::response($this->catalogue())]);
-        app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server);
+        app(LuantiWorldTemplateSynchronizer::class)->sync($this->admin, $this->server);
         $this->assertSame('Unser Kartenname', $existing->fresh()->name);
         $this->assertFalse($existing->fresh()->is_selectable);
         $this->assertNotNull($existing->fresh()->last_discovered_at);
         $this->assertTrue($manual->fresh()->is_available);
         $this->assertNull($manual->fresh()->last_discovered_at);
         $this->assertNull($otherServer->fresh()->last_discovered_at);
-        $this->assertDatabaseCount('luanti_worlds', 4);
+        $this->assertDatabaseCount('luanti_world_templates', 4);
     }
 
     public function test_missing_maps_are_preserved_for_requests_and_reappear_without_changing_local_flags(): void
     {
-        Http::fakeSequence()->push($this->catalogue())->push(['version' => 1, 'worlds' => []])->push($this->catalogue());
-        $service = app(LuantiWorldSynchronizer::class);
+        Http::fakeSequence()->push($this->catalogue())->push(['version' => 1, 'templates' => []])->push($this->catalogue());
+        $service = app(LuantiWorldTemplateSynchronizer::class);
         $service->sync($this->admin, $this->server);
-        $world = $this->server->worlds()->where('world_identifier', 'dev')->sole();
-        $request = WorldRequest::factory()->approved()->create(['luanti_world_id' => $world->id]);
+        $world = $this->server->templates()->where('template_identifier', 'dev')->sole();
+        $request = WorldRequest::factory()->approved()->create(['luanti_world_template_id' => $world->id]);
         $membership = OrganizationMembership::factory()->create(['organization_id' => $request->organization_id, 'user_id' => $request->user_id]);
         $world->update(['is_selectable' => false]);
         $service->sync($this->admin, $this->server);
         $this->assertFalse($world->fresh()->is_available);
         $this->assertSame(WorldRequestStatus::Approved, $request->fresh()->status);
-        $this->assertSame($world->id, $request->fresh()->luanti_world_id);
+        $this->assertSame($world->id, $request->fresh()->luanti_world_template_id);
         $this->assertArrayNotHasKey($world->id, app(WorldRequests::class)->worldOptions($membership->user, $membership->organization));
         $this->assertArrayHasKey($world->id, app(WorldRequests::class)->worldOptions($membership->user, $membership->organization, $request));
         $service->sync($this->admin, $this->server);
         $this->assertTrue($world->fresh()->is_available);
         $this->assertFalse($world->fresh()->is_selectable);
-        $this->assertDatabaseCount('luanti_worlds', 2);
+        $this->assertDatabaseCount('luanti_world_templates', 2);
     }
 
     public static function invalidResponses(): array
     {
         return [
             'bad JSON' => [200, '{broken'], 'HTML' => [200, '<html>private remote details</html>'],
-            'wrong version' => [200, ['version' => 2, 'worlds' => []]],
-            'string version' => [200, ['version' => '1', 'worlds' => []]],
-            'boolean version' => [200, ['version' => true, 'worlds' => []]],
+            'wrong version' => [200, ['version' => 2, 'templates' => []]],
+            'string version' => [200, ['version' => '1', 'templates' => []]],
+            'boolean version' => [200, ['version' => true, 'templates' => []]],
             'missing list' => [200, ['version' => 1]],
             'object list' => [200, '{"version":1,"worlds":{}}'],
-            'invalid identifier' => [200, ['version' => 1, 'worlds' => [['world_id' => '../world', 'name' => 'Map']]]],
-            'missing name' => [200, ['version' => 1, 'worlds' => [['world_id' => 'dev']]]],
-            'blank name' => [200, ['version' => 1, 'worlds' => [['world_id' => 'dev', 'name' => ' ']]]],
-            'duplicate ID' => [200, ['version' => 1, 'worlds' => [['world_id' => 'dev', 'name' => 'One'], ['world_id' => 'dev', 'name' => 'Two']]]],
-            'partial malformed list' => [200, ['version' => 1, 'worlds' => [['world_id' => 'new', 'name' => 'One'], null]]],
+            'invalid identifier' => [200, ['version' => 1, 'templates' => [['template_id' => '../world', 'revision' => str_repeat('a', 64), 'name' => 'Map']]]],
+            'missing name' => [200, ['version' => 1, 'templates' => [['template_id' => 'dev', 'revision' => str_repeat('a', 64)]]]],
+            'blank name' => [200, ['version' => 1, 'templates' => [['template_id' => 'dev', 'revision' => str_repeat('a', 64), 'name' => ' ']]]],
+            'duplicate ID' => [200, ['version' => 1, 'templates' => [['template_id' => 'dev', 'revision' => str_repeat('a', 64), 'name' => 'One'], ['template_id' => 'dev', 'revision' => str_repeat('a', 64), 'name' => 'Two']]]],
+            'partial malformed list' => [200, ['version' => 1, 'templates' => [['template_id' => 'new', 'revision' => str_repeat('a', 64), 'name' => 'One'], null]]],
             'oversized response' => [200, str_repeat('x', 256 * 1024 + 1)],
             'oversized unauthorized' => [401, str_repeat('x', 256 * 1024 + 1)],
             'oversized not found' => [404, str_repeat('x', 256 * 1024 + 1)],
@@ -160,28 +160,28 @@ class LuantiWorldSyncTest extends TestCase
     #[DataProvider('invalidResponses')]
     public function test_failed_or_invalid_fetches_preserve_catalogue_and_last_success_and_use_safe_errors(int $status, array|string $body): void
     {
-        $world = LuantiWorld::factory()->create(['luanti_server_id' => $this->server->id,
+        $world = LuantiWorldTemplate::factory()->create(['luanti_server_id' => $this->server->id,
             'last_discovered_at' => now(), 'is_available' => true]);
         $this->server->forceFill(['worlds_synced_at' => now()->subHour()])->save();
         $syncedAt = $this->server->worlds_synced_at->toDateTimeString();
         $original = $world->fresh()->getRawOriginal();
         Http::fake(['*' => Http::response($body, $status, ['Location' => 'https://other.example.test'])]);
-        $result = app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server);
+        $result = app(LuantiWorldTemplateSynchronizer::class)->sync($this->admin, $this->server);
         $this->assertFalse($result['successful']);
         $this->assertSame($original, $world->fresh()->getRawOriginal());
         $this->assertSame($syncedAt, $this->server->fresh()->worlds_synced_at->toDateTimeString());
         $this->assertNotNull($this->server->fresh()->world_sync_error);
         $this->assertStringNotContainsString('private', json_encode($result, JSON_THROW_ON_ERROR));
         $this->assertStringNotContainsString('private', $this->server->fresh()->world_sync_error);
-        $this->assertDatabaseCount('luanti_worlds', 1);
+        $this->assertDatabaseCount('luanti_world_templates', 1);
         Http::assertSentCount(1);
     }
 
     public function test_connection_exception_is_sanitized_and_does_not_retry_or_clear_catalogue(): void
     {
-        $world = LuantiWorld::factory()->create(['luanti_server_id' => $this->server->id]);
+        $world = LuantiWorldTemplate::factory()->create(['luanti_server_id' => $this->server->id]);
         Http::fake(['*' => Http::failedConnection('private-test-token')]);
-        $result = app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server);
+        $result = app(LuantiWorldTemplateSynchronizer::class)->sync($this->admin, $this->server);
         $this->assertFalse($result['successful']);
         $this->assertSame('Bridge nicht erreichbar', $result['title']);
         $this->assertStringNotContainsString('private-test-token', json_encode($result, JSON_THROW_ON_ERROR));
@@ -205,7 +205,7 @@ class LuantiWorldSyncTest extends TestCase
     public function test_invalid_configuration_never_sends_a_request(string $field, ?string $value): void
     {
         $this->server->update([$field => $value]);
-        $this->assertFalse(app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server)['successful']);
+        $this->assertFalse(app(LuantiWorldTemplateSynchronizer::class)->sync($this->admin, $this->server)['successful']);
         Http::assertNothingSent();
     }
 
@@ -224,7 +224,7 @@ class LuantiWorldSyncTest extends TestCase
             default => User::factory()->create(),
         };
         try {
-            app(LuantiWorldSynchronizer::class)->sync($actor, $this->server);
+            app(LuantiWorldTemplateSynchronizer::class)->sync($actor, $this->server);
             $this->fail('Expected access denial.');
         } catch (AuthorizationException|HttpException) {
             Http::assertNothingSent();
@@ -240,9 +240,9 @@ class LuantiWorldSyncTest extends TestCase
         }]);
         $this->expectException(AuthorizationException::class);
         try {
-            app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server);
+            app(LuantiWorldTemplateSynchronizer::class)->sync($this->admin, $this->server);
         } finally {
-            $this->assertDatabaseCount('luanti_worlds', 0);
+            $this->assertDatabaseCount('luanti_world_templates', 0);
             $this->assertNull($this->server->fresh()->worlds_synced_at);
         }
     }
@@ -254,9 +254,9 @@ class LuantiWorldSyncTest extends TestCase
 
             return Http::response($this->catalogue());
         }]);
-        $result = app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server);
+        $result = app(LuantiWorldTemplateSynchronizer::class)->sync($this->admin, $this->server);
         $this->assertFalse($result['successful']);
-        $this->assertDatabaseCount('luanti_worlds', 0);
+        $this->assertDatabaseCount('luanti_world_templates', 0);
     }
 
     public function test_manual_and_scheduled_sync_share_a_per_server_lock(): void
@@ -264,10 +264,10 @@ class LuantiWorldSyncTest extends TestCase
         $lock = Cache::lock('luanti:worlds:sync:'.$this->server->id, 120);
         $this->assertTrue($lock->get());
         try {
-            $result = app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server);
+            $result = app(LuantiWorldTemplateSynchronizer::class)->sync($this->admin, $this->server);
             $this->assertFalse($result['successful']);
             $this->assertSame('Synchronisierung läuft bereits', $result['title']);
-            $this->assertFalse(app(LuantiWorldSynchronizer::class)->syncConfiguredServers()[$this->server->id]['successful']);
+            $this->assertFalse(app(LuantiWorldTemplateSynchronizer::class)->syncConfiguredServers()[$this->server->id]['successful']);
             Http::assertNothingSent();
         } finally {
             $lock->release();
@@ -278,11 +278,11 @@ class LuantiWorldSyncTest extends TestCase
     {
         LuantiServer::factory()->create();
         $other = LuantiServer::factory()->create(['api_base_url' => 'https://other.example.test', 'api_token' => 'other-token']);
-        Http::fake(['https://bridge.example.test/prefix/v1/worlds' => Http::response('private error', 503),
-            'https://other.example.test/v1/worlds' => Http::response($this->catalogue())]);
+        Http::fake(['https://bridge.example.test/prefix/v1/world-templates' => Http::response('private error', 503),
+            'https://other.example.test/v1/world-templates' => Http::response($this->catalogue())]);
         $this->artisan('luanti:worlds:sync')->assertExitCode(1);
-        $this->assertSame(0, $this->server->worlds()->count());
-        $this->assertSame(2, $other->worlds()->count());
+        $this->assertSame(0, $this->server->templates()->count());
+        $this->assertSame(2, $other->templates()->count());
         Http::assertSentCount(2);
     }
 
@@ -309,42 +309,42 @@ class LuantiWorldSyncTest extends TestCase
         $this->panel($this->admin);
         Livewire::test(LuantiServers::class)->callAction(TestAction::make('syncWorlds')->table($this->server))
             ->assertNotified('Welten synchronisiert')->assertDontSee('private-test-token');
-        Livewire::test(LuantiWorlds::class)->callAction('syncWorlds', ['luanti_server_id' => $this->server->id])
-            ->assertNotified('Welten synchronisiert')->assertCanSeeTableRecords($this->server->worlds);
+        Livewire::test(LuantiWorldTemplates::class)->callAction('syncWorlds', ['luanti_server_id' => $this->server->id])
+            ->assertNotified('Welten synchronisiert')->assertCanSeeTableRecords($this->server->templates);
         $membership = OrganizationMembership::factory()->create();
         $this->panel($membership->user, 'portal', $membership->organization);
-        $world = $this->server->worlds()->where('world_identifier', 'dev')->sole();
+        $world = $this->server->templates()->where('template_identifier', 'dev')->sole();
         Livewire::test(WorldRequestsPage::class)->callAction('create', [
-            'name' => 'Kartenantrag', 'luanti_world_id' => $world->id, 'start_date' => now('Europe/Berlin')->toDateString(),
+            'name' => 'Kartenantrag', 'luanti_world_template_id' => $world->id, 'start_date' => now('Europe/Berlin')->toDateString(),
             'end_date' => now('Europe/Berlin')->toDateString(), 'participant_count' => 12,
         ])->assertHasNoActionErrors()->assertNotified('Weltantrag eingereicht');
-        $this->assertDatabaseHas('world_requests', ['luanti_world_id' => $world->id]);
+        $this->assertDatabaseHas('world_requests', ['luanti_world_template_id' => $world->id]);
     }
 
     public function test_synced_map_name_and_hidden_setting_remain_editable_but_identity_is_protected(): void
     {
         Http::fake(fn (): PromiseInterface => Http::response($this->catalogue()));
-        app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server);
-        $world = $this->server->worlds()->where('world_identifier', 'dev')->sole();
+        app(LuantiWorldTemplateSynchronizer::class)->sync($this->admin, $this->server);
+        $world = $this->server->templates()->where('template_identifier', 'dev')->sole();
         $this->panel($this->admin);
-        Livewire::test(LuantiWorlds::class)->callAction(TestAction::make('edit')->table($world), [
+        Livewire::test(LuantiWorldTemplates::class)->callAction(TestAction::make('edit')->table($world), [
             'name' => 'Lokaler Name', 'is_selectable' => false,
         ])->assertHasNoActionErrors();
-        app(LuantiWorldSynchronizer::class)->sync($this->admin, $this->server);
+        app(LuantiWorldTemplateSynchronizer::class)->sync($this->admin, $this->server);
         $this->assertSame('Lokaler Name', $world->fresh()->name);
         $this->assertFalse($world->fresh()->is_selectable);
         $this->expectException(ValidationException::class);
-        app(LuantiWorldRegistry::class)->update($this->admin, $world, [
-            ...$world->only(['luanti_server_id', 'name', 'world_identifier', 'is_selectable']), 'world_identifier' => 'replacement',
+        app(LuantiWorldTemplateRegistry::class)->update($this->admin, $world, [
+            ...$world->only(['luanti_server_id', 'name', 'template_identifier', 'is_selectable']), 'template_identifier' => 'replacement',
         ]);
     }
 
     public function test_unavailable_maps_cannot_be_requested_or_approved_but_existing_requests_allow_corrections(): void
     {
-        $world = LuantiWorld::factory()->create(['is_available' => false]);
-        $request = WorldRequest::factory()->create(['luanti_world_id' => $world->id]);
+        $world = LuantiWorldTemplate::factory()->create(['is_available' => false]);
+        $request = WorldRequest::factory()->create(['luanti_world_template_id' => $world->id]);
         $membership = OrganizationMembership::factory()->create(['organization_id' => $request->organization_id, 'user_id' => $request->user_id]);
-        $data = [...$request->only(['name', 'luanti_world_id', 'participant_count']),
+        $data = [...$request->only(['name', 'luanti_world_template_id', 'participant_count']),
             'start_date' => $request->start_date->toDateString(), 'end_date' => $request->end_date->toDateString()];
         $service = app(WorldRequests::class);
         $service->update($membership->user, $request, [...$data, 'participant_count' => 20], 1);
@@ -352,7 +352,7 @@ class LuantiWorldSyncTest extends TestCase
             $service->create($membership->user, $membership->organization, $data);
             $this->fail('Expected unavailable map validation.');
         } catch (ValidationException $exception) {
-            $this->assertArrayHasKey('luanti_world_id', $exception->errors());
+            $this->assertArrayHasKey('luanti_world_template_id', $exception->errors());
         }
         $this->assertSame(20, $request->fresh()->participant_count);
         $this->expectException(ValidationException::class);

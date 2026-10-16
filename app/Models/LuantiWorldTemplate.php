@@ -2,17 +2,17 @@
 
 namespace App\Models;
 
-use Database\Factories\LuantiWorldFactory;
+use Database\Factories\LuantiWorldTemplateFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['luanti_server_id', 'name', 'world_identifier', 'is_selectable'])]
-class LuantiWorld extends Model
+#[Fillable(['luanti_server_id', 'name', 'template_identifier', 'revision', 'is_selectable'])]
+class LuantiWorldTemplate extends Model
 {
-    /** @use HasFactory<LuantiWorldFactory> */
+    /** @use HasFactory<LuantiWorldTemplateFactory> */
     use HasFactory;
 
     protected function casts(): array

@@ -3,7 +3,7 @@
 namespace Tests\Feature;
 
 use App\Enums\WorldRequestStatus;
-use App\Models\LuantiWorld;
+use App\Models\LuantiWorldTemplate;
 use App\Models\Organization;
 use App\Models\OrganizationMembership;
 use App\Models\User;
@@ -31,7 +31,7 @@ class WorldRequestsTest extends TestCase
 
     private User $member;
 
-    private LuantiWorld $world;
+    private LuantiWorldTemplate $world;
 
     protected function setUp(): void
     {
@@ -45,14 +45,14 @@ class WorldRequestsTest extends TestCase
             OrganizationMembership::factory()->create(['organization_id' => $this->organization->id, 'user_id' => $user->id]);
         }
         OrganizationMembership::factory()->manager()->create(['organization_id' => $this->organization->id, 'user_id' => $this->manager->id]);
-        $this->world = LuantiWorld::factory()->create();
+        $this->world = LuantiWorldTemplate::factory()->create();
         Http::preventStrayRequests();
     }
 
-    /** @return array{name: string, luanti_world_id: int, start_date: string, end_date: string, participant_count: int} */
+    /** @return array{name: string, luanti_world_template_id: int, start_date: string, end_date: string, participant_count: int} */
     private function data(): array
     {
-        return ['name' => '  Jugendtreff  ', 'luanti_world_id' => $this->world->id,
+        return ['name' => '  Jugendtreff  ', 'luanti_world_template_id' => $this->world->id,
             'start_date' => '2026-10-11', 'end_date' => '2026-10-11', 'participant_count' => 15];
     }
 
@@ -85,7 +85,7 @@ class WorldRequestsTest extends TestCase
     {
         return [
             'blank name' => ['name', '   '], 'long name' => ['name', str_repeat('a', 256)],
-            'invalid world' => ['luanti_world_id', 999999], 'world array' => ['luanti_world_id', []],
+            'invalid world' => ['luanti_world_template_id', 999999], 'world array' => ['luanti_world_template_id', []],
             'past start' => ['start_date', '2026-10-10'], 'invalid date' => ['start_date', '2026-02-30'],
             'date with time' => ['start_date', '2026-10-11 12:00:00'],
             'end before start' => ['end_date', '2026-10-10'], 'missing end' => ['end_date', null],
@@ -111,7 +111,7 @@ class WorldRequestsTest extends TestCase
     {
         $cases = [];
         foreach (['applicant', 'manager', 'admin', 'caseworker'] as $editor) {
-            foreach (['start_date', 'end_date', 'luanti_world_id', 'name', 'participant_count', 'unchanged'] as $field) {
+            foreach (['start_date', 'end_date', 'luanti_world_template_id', 'name', 'participant_count', 'unchanged'] as $field) {
                 $cases[$editor.' '.$field] = [$editor, $field];
             }
         }
@@ -120,7 +120,7 @@ class WorldRequestsTest extends TestCase
     }
 
     #[DataProvider('editorChanges')]
-    public function test_approved_edits_reapprove_only_world_or_date_changes(string $editor, string $field): void
+    public function test_approved_edits_reapprove_only_date_changes_and_template_switch_is_self_service(string $editor, string $field): void
     {
         $service = app(WorldRequests::class);
         $request = $this->request();
@@ -136,14 +136,18 @@ class WorldRequestsTest extends TestCase
         $data = match ($field) {
             'start_date' => [...$data, 'start_date' => '2026-10-12'],
             'end_date' => [...$data, 'end_date' => '2026-10-16'],
-            'luanti_world_id' => [...$data, 'luanti_world_id' => LuantiWorld::factory()->create()->id],
+            'luanti_world_template_id' => [...$data, 'luanti_world_template_id' => LuantiWorldTemplate::factory()->create(['luanti_server_id' => $request->world->luanti_server_id])->id],
             'name' => [...$data, 'name' => 'Neuer Name'],
             'participant_count' => [...$data, 'participant_count' => 20],
             default => $data,
         };
-        $service->update($actor, $request, [...$data, 'status' => 'rejected', 'user_id' => $actor->id], 4);
+        if ($field === 'luanti_world_template_id') {
+            $service->changeTemplate($actor, $request, $data['luanti_world_template_id'], 4);
+        } else {
+            $service->update($actor, $request, [...$data, 'status' => 'rejected', 'user_id' => $actor->id], 4);
+        }
         $fresh = $request->fresh();
-        $reapproval = in_array($field, ['start_date', 'end_date', 'luanti_world_id'], true);
+        $reapproval = in_array($field, ['start_date', 'end_date'], true);
         $this->assertSame($reapproval ? WorldRequestStatus::Pending : WorldRequestStatus::Approved, $fresh->status);
         $this->assertSame($reapproval ? null : $reviewer->id, $fresh->decided_by);
         $this->assertSame($reapproval, $fresh->decided_at === null);
@@ -279,8 +283,8 @@ class WorldRequestsTest extends TestCase
     public function test_update_cannot_switch_to_a_retired_world(): void
     {
         $request = $this->request();
-        $retired = LuantiWorld::factory()->retired()->create();
+        $retired = LuantiWorldTemplate::factory()->retired()->create();
         $this->expectException(ValidationException::class);
-        app(WorldRequests::class)->update($this->applicant, $request, [...$this->data(), 'luanti_world_id' => $retired->id], 1);
+        app(WorldRequests::class)->update($this->applicant, $request, [...$this->data(), 'luanti_world_template_id' => $retired->id], 1);
     }
 }

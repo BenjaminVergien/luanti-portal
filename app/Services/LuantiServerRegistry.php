@@ -64,7 +64,7 @@ class LuantiServerRegistry
         DB::transaction(function () use ($actor, $server): void {
             $server = LuantiServer::query()->whereKey($server->id)->lockForUpdate()->firstOrFail();
             Gate::forUser($this->access->currentUser($actor))->authorize('delete', $server);
-            if ($server->worlds()->exists()) {
+            if ($server->templates()->exists()) {
                 throw ValidationException::withMessages(['server' => 'Dieser Server enthält Katalogwelten und kann nicht gelöscht werden.']);
             }
             $server->delete();

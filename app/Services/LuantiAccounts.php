@@ -7,7 +7,7 @@ use App\Jobs\ProcessLuantiAccounts;
 use App\Models\LuantiAccount;
 use App\Models\LuantiAccountAssignment;
 use App\Models\LuantiAccountJob;
-use App\Models\LuantiWorld;
+use App\Models\LuantiGameInstance;
 use App\Models\User;
 use App\Models\WorldRequest;
 use Carbon\CarbonImmutable;
@@ -30,10 +30,10 @@ class LuantiAccounts
         Gate::forUser($actor)->authorize('manageAccounts', $request);
     }
 
-    /** @return array{world_id: int, starts_at: int, ends_at: int, generation: int} */
+    /** @return array{instance_id: int|null, server_id: int, starts_at: int, ends_at: int, generation: int} */
     public function snapshot(WorldRequest $request): array
     {
-        return ['world_id' => $request->luanti_world_id,
+        return ['instance_id' => $request->current_game_instance_id, 'server_id' => $request->world->luanti_server_id,
             'starts_at' => CarbonImmutable::parse($request->start_date->toDateString(), 'Europe/Berlin')->startOfDay()->timestamp,
             'ends_at' => CarbonImmutable::parse($request->end_date->toDateString(), 'Europe/Berlin')->addDay()->startOfDay()->timestamp,
             'generation' => ($request->approved_access['generation'] ?? 0) + 1];
@@ -56,15 +56,18 @@ class LuantiAccounts
                 throw ValidationException::withMessages(['accounts' => 'Neue Spielaccounts benötigen einen genehmigten Weltantrag.']);
             }
             $snapshot = $request->approved_access ?? $this->snapshot($request);
-            $world = LuantiWorld::query()->whereKey($snapshot['world_id'])->lockForUpdate()->firstOrFail();
-            if (! $world->is_available) {
+            if ($snapshot['instance_id'] === null) {
+                throw ValidationException::withMessages(['accounts' => 'Die private Spielinstanz wird noch vorbereitet.']);
+            }
+            $world = LuantiGameInstance::query()->whereKey($snapshot['instance_id'])->lockForUpdate()->firstOrFail();
+            if ($world->is_archived) {
                 throw ValidationException::withMessages(['accounts' => 'Die genehmigte Welt ist nicht mehr verfügbar.']);
             }
             $request->forceFill(['approved_access' => $snapshot])->save();
             foreach ($data['accounts'] as $index => $row) {
                 $normalized = strtolower($row['username']);
                 if (LuantiAccount::query()->where('world_request_id', $request->id)->where('normalized_username', $normalized)->exists()
-                    || LuantiAccountAssignment::query()->where('luanti_world_id', $world->id)->where('normalized_username', $normalized)->exists()) {
+                    || LuantiAccountAssignment::query()->where('luanti_game_instance_id', $world->id)->where('normalized_username', $normalized)->exists()) {
                     throw ValidationException::withMessages(['accounts.'.$index.'.username' => 'Dieser Spielname ist für den Antrag oder diese Welt bereits vergeben.']);
                 }
                 $account = LuantiAccount::query()->create(['world_request_id' => $request->id, 'username' => $row['username'],
@@ -86,14 +89,16 @@ class LuantiAccounts
     public function retry(User $actor, WorldRequest $request): void
     {
         $this->authorize($actor, $request);
+        app(LuantiGameInstances::class)->retry($request);
         DB::transaction(function () use ($actor, $request): void {
             $request = WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
             $this->authorize($actor, $request);
-            $unknown = LuantiAccountJob::query()->where('world_request_id', $request->id)->where('state', 'unknown')->first();
+            $unknown = LuantiAccountJob::query()->where('world_request_id', $request->id)->where('luanti_game_instance_id', $request->current_game_instance_id)->where('state', 'unknown')->first();
             if ($unknown !== null) {
                 $unknown->update(['state' => 'pending']);
             } else {
-                LuantiAccountAssignment::query()->whereHas('account', fn (Builder $query): Builder => $query->where('world_request_id', $request->id))->update(['error' => null]);
+                LuantiAccountAssignment::query()->where('luanti_game_instance_id', $request->current_game_instance_id)
+                    ->whereHas('account', fn (Builder $query): Builder => $query->where('world_request_id', $request->id))->update(['error' => null]);
             }
             ProcessLuantiAccounts::dispatch($request->id)->afterCommit();
         });
@@ -101,11 +106,14 @@ class LuantiAccounts
 
     public function canCorrect(LuantiAccount $account): bool
     {
-        return ! LuantiAccountJob::query()->where('world_request_id', $account->world_request_id)->whereIn('state', ['queued', 'pending', 'unknown'])->exists()
-            && $account->assignments()->exists()
-            && ! $account->assignments()->whereNotNull('applied_window')->exists()
-            && ! $account->assignments()->where('outcome_uncertain', true)->exists()
-            && ! $account->assignments()->where(fn (Builder $query): Builder => $query->whereNull('error')
+        $instanceId = $account->worldRequest->current_game_instance_id;
+        $assignments = $account->assignments()->where('luanti_game_instance_id', $instanceId);
+
+        return ! LuantiAccountJob::query()->where('luanti_game_instance_id', $instanceId)->whereIn('state', ['queued', 'pending', 'unknown'])->exists()
+            && (clone $assignments)->exists()
+            && ! (clone $assignments)->whereNotNull('applied_window')->exists()
+            && ! (clone $assignments)->where('outcome_uncertain', true)->exists()
+            && ! (clone $assignments)->where(fn (Builder $query): Builder => $query->whereNull('error')
                 ->orWhereNotIn('error', ['protected_account', 'existing_account']))->exists();
     }
 
@@ -126,10 +134,10 @@ class LuantiAccounts
             if (LuantiAccount::query()->where('world_request_id', $request->id)->where('normalized_username', $normalized)->whereKeyNot($account->id)->exists()) {
                 throw ValidationException::withMessages(['username' => 'Dieser Spielname ist bereits vergeben.']);
             }
-            $assignments = $account->assignments()->orderBy('luanti_world_id')->get();
-            LuantiWorld::query()->whereIn('id', $assignments->pluck('luanti_world_id'))->orderBy('id')->lockForUpdate()->get();
+            $assignments = $account->assignments()->where('luanti_game_instance_id', $request->current_game_instance_id)->orderBy('luanti_game_instance_id')->get();
+            LuantiGameInstance::query()->whereIn('id', $assignments->pluck('luanti_game_instance_id'))->orderBy('id')->lockForUpdate()->get();
             foreach ($assignments as $assignment) {
-                if (LuantiAccountAssignment::query()->where('luanti_world_id', $assignment->luanti_world_id)->where('normalized_username', $normalized)
+                if (LuantiAccountAssignment::query()->where('luanti_game_instance_id', $assignment->luanti_game_instance_id)->where('normalized_username', $normalized)
                     ->where('luanti_account_id', '<>', $account->id)->exists()) {
                     throw ValidationException::withMessages(['username' => 'Dieser Spielname ist in der Welt bereits vergeben.']);
                 }
@@ -142,7 +150,7 @@ class LuantiAccounts
 
     public function status(LuantiAccount $account): string
     {
-        $assignments = $account->assignments;
+        $assignments = $account->assignments->where('luanti_game_instance_id', $account->worldRequest->current_game_instance_id);
         if ($assignments->contains(fn (LuantiAccountAssignment $assignment): bool => $assignment->error !== null)) {
             return 'Fehlgeschlagen';
         }
@@ -169,6 +177,9 @@ class LuantiAccounts
                 $request->forceFill(['approved_access' => $desired])->save();
             }
             $this->cancelSupersededUnsentJobs($request);
+            if ($request->status === WorldRequestStatus::Rejected) {
+                return;
+            }
             if (LuantiAccountJob::query()->where('world_request_id', $requestId)->whereIn('state', ['queued', 'pending', 'unknown'])->exists()) {
                 return;
             }
@@ -177,12 +188,12 @@ class LuantiAccounts
             }
             $window = ['starts_at' => $desired['starts_at'], 'ends_at' => $desired['ends_at']];
             $accounts = LuantiAccount::query()->where('world_request_id', $requestId)->with('assignments')->orderBy('id')->get();
-            $assignments = $accounts->flatMap->assignments;
+            $assignments = $accounts->flatMap->assignments->where('luanti_game_instance_id', $desired['instance_id']);
             $old = $assignments->filter(fn (LuantiAccountAssignment $assignment): bool => $assignment->error === null && $assignment->applied_admitted
-                && ($assignment->luanti_world_id !== $desired['world_id'] || $assignment->applied_window !== $window));
+                && ($assignment->luanti_game_instance_id !== $desired['instance_id'] || $assignment->applied_window !== $window));
             if ($old->isNotEmpty()) {
-                $worldId = $old->first()->luanti_world_id;
-                $batch = $old->where('luanti_world_id', $worldId)->take(100);
+                $worldId = $old->first()->luanti_game_instance_id;
+                $batch = $old->where('luanti_game_instance_id', $worldId)->take(100);
                 $this->makeJob($request, $worldId, 'revoke', $desired['generation'], $batch->map(fn (LuantiAccountAssignment $assignment): array => [
                     'account' => $accounts->firstWhere('id', $assignment->luanti_account_id), 'window' => $assignment->applied_window,
                 ])->values()->all());
@@ -192,13 +203,13 @@ class LuantiAccounts
             if ($assignments->contains(fn (LuantiAccountAssignment $assignment): bool => $assignment->error !== null)) {
                 return;
             }
-            $world = LuantiWorld::query()->whereKey($desired['world_id'])->lockForUpdate()->firstOrFail();
-            if (! $world->is_available) {
+            $world = LuantiGameInstance::query()->whereKey($desired['instance_id'])->lockForUpdate()->firstOrFail();
+            if ($world->is_archived || ! $world->is_prepared || $world->state !== 'running') {
                 return;
             }
             $batch = [];
             foreach ($accounts as $account) {
-                $assignment = $account->assignments->firstWhere('luanti_world_id', $world->id);
+                $assignment = $account->assignments->firstWhere('luanti_game_instance_id', $world->id);
                 if ($assignment?->applied_admitted && $assignment->applied_window === $window && ! $assignment->outcome_uncertain) {
                     continue;
                 }
@@ -228,10 +239,10 @@ class LuantiAccounts
     private function reserve(LuantiAccount $account, int $worldId): bool
     {
         $assignment = LuantiAccountAssignment::query()->firstOrCreate([
-            'luanti_world_id' => $worldId, 'normalized_username' => $account->normalized_username,
+            'luanti_game_instance_id' => $worldId, 'normalized_username' => $account->normalized_username,
         ], ['luanti_account_id' => $account->id]);
         if ($assignment->luanti_account_id !== $account->id) {
-            $account->assignments()->where('luanti_world_id', '<>', $worldId)->update(['error' => 'Spielname in der Zielwelt bereits vergeben.']);
+            $account->assignments()->where('luanti_game_instance_id', '<>', $worldId)->update(['error' => 'Spielname in der Zielwelt bereits vergeben.']);
 
             return false;
         }
@@ -239,27 +250,15 @@ class LuantiAccounts
         return true;
     }
 
-    public function reserveApprovedWorld(WorldRequest $request): void
-    {
-        foreach ($request->luantiAccounts()->get() as $account) {
-            $collision = LuantiAccountAssignment::query()->where('luanti_world_id', $request->luanti_world_id)
-                ->where('normalized_username', $account->normalized_username)->where('luanti_account_id', '<>', $account->id)->exists();
-            if ($collision) {
-                throw ValidationException::withMessages(['luanti_world_id' => 'Ein Spielname dieses Antrags ist in der Zielwelt bereits vergeben. Bitte eine andere Welt wählen.']);
-            }
-            $this->reserve($account, $request->luanti_world_id);
-        }
-    }
-
     /** @param list<array{account: LuantiAccount, window: array{starts_at: int, ends_at: int}}> $batch */
     private function makeJob(WorldRequest $request, int $worldId, string $operation, int $generation, #[\SensitiveParameter] array $batch): void
     {
-        $world = LuantiWorld::query()->with('server')->findOrFail($worldId);
+        $world = LuantiGameInstance::query()->with('server')->findOrFail($worldId);
         $jobId = 'portal-'.Str::uuid();
         $entries = array_map(fn (array $entry): array => [
             'username' => $entry['account']->username, 'role' => $entry['account']->role, 'admitted' => $operation === 'grant',
             'access_window' => $entry['window'], ...(! LuantiAccountAssignment::query()
-                ->where('luanti_account_id', $entry['account']->id)->where('luanti_world_id', $worldId)->where('is_provisioned', true)->exists()
+                ->where('luanti_account_id', $entry['account']->id)->where('luanti_game_instance_id', $worldId)->where('is_provisioned', true)->exists()
                     ? ['initial_password' => $entry['account']->initial_password] : []),
         ], $batch);
         $payload = json_encode(['version' => 2, 'job_id' => $jobId, 'operation' => 'sync_accounts', 'accounts' => $entries], JSON_THROW_ON_ERROR);
@@ -268,9 +267,9 @@ class LuantiAccounts
             array_pop($batch);
             $payload = json_encode(['version' => 2, 'job_id' => $jobId, 'operation' => 'sync_accounts', 'accounts' => $entries], JSON_THROW_ON_ERROR);
         }
-        LuantiAccountJob::query()->create(['world_request_id' => $request->id, 'luanti_world_id' => $worldId,
+        LuantiAccountJob::query()->create(['world_request_id' => $request->id, 'luanti_game_instance_id' => $worldId,
             'job_id' => $jobId, 'operation' => $operation, 'state' => 'queued', 'generation' => $generation,
-            'base_url' => rtrim((string) $world->server->api_base_url, '/'), 'world_identifier' => $world->world_identifier,
+            'base_url' => rtrim((string) $world->server->api_base_url, '/'), 'instance_identifier' => $world->instance_identifier,
             'account_ids' => array_map(fn (array $entry): int => $entry['account']->id, $batch), 'request_payload' => $payload]);
     }
 
@@ -285,7 +284,12 @@ class LuantiAccounts
                 if (! in_array($job->state, ['queued', 'pending'], true)) {
                     return null;
                 }
-                $server = $job->world->server;
+                if ($job->instance->is_archived || $job->luanti_game_instance_id !== $request->current_game_instance_id) {
+                    $job->update(['state' => 'cancelled']);
+
+                    return null;
+                }
+                $server = $job->instance->server;
                 $base = rtrim((string) $server->api_base_url, '/');
                 $parts = parse_url($base);
                 if ($parts === false || ($parts['scheme'] ?? null) !== 'https' || ! isset($parts['host'])
@@ -309,8 +313,8 @@ class LuantiAccounts
             if ($job === null) {
                 return;
             }
-            $server = $job->world->server;
-            $url = $job->base_url.'/v1/worlds/'.rawurlencode($job->world_identifier).'/accounts/jobs';
+            $server = $job->instance->server;
+            $url = $job->base_url.'/v1/worlds/'.rawurlencode($job->instance_identifier).'/accounts/jobs';
             try {
                 $response = $job->state === 'queued'
                     ? $this->http->send('POST', $url, $server->api_token, 10, $job->request_payload)
@@ -341,7 +345,7 @@ class LuantiAccounts
             }
             $envelope = $response->json();
             if (! is_array($envelope) || ($envelope['version'] ?? null) !== 1 || ($envelope['job_id'] ?? null) !== $job->job_id
-                || ($envelope['world_id'] ?? null) !== $job->world_identifier) {
+                || ($envelope['world_id'] ?? null) !== $job->instance_identifier) {
                 $this->unknown($job);
 
                 return;
@@ -365,7 +369,7 @@ class LuantiAccounts
     {
         DB::transaction(function () use ($job, $message): void {
             $job->update(['state' => 'completed', 'error' => $message]);
-            LuantiAccountAssignment::query()->where('luanti_world_id', $job->luanti_world_id)
+            LuantiAccountAssignment::query()->where('luanti_game_instance_id', $job->luanti_game_instance_id)
                 ->whereIn('luanti_account_id', $job->account_ids)->update(['error' => $message]);
         });
     }
@@ -409,7 +413,7 @@ class LuantiAccounts
         DB::transaction(function () use ($job, $payload, $safeResults, $result): void {
             $request = WorldRequest::query()->whereKey($job->world_request_id)->lockForUpdate()->firstOrFail();
             foreach ($safeResults as $index => $outcome) {
-                $assignment = LuantiAccountAssignment::query()->where('luanti_world_id', $job->luanti_world_id)
+                $assignment = LuantiAccountAssignment::query()->where('luanti_game_instance_id', $job->luanti_game_instance_id)
                     ->where('luanti_account_id', $job->account_ids[$index])->firstOrFail();
                 if ($outcome['status'] === 'rejected') {
                     $changes = ['error' => $outcome['code']];

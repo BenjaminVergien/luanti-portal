@@ -5,7 +5,7 @@ namespace Database\Factories;
 use App\Models\LuantiAccount;
 use App\Models\LuantiAccountAssignment;
 use App\Models\LuantiAccountJob;
-use App\Models\LuantiWorld;
+use App\Models\LuantiGameInstance;
 use App\Models\WorldRequest;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Factories\Factory;
@@ -19,22 +19,22 @@ class LuantiAccountJobFactory extends Factory
     /**
      * Define the model's default state.
      *
-     * @return array{world_request_id: WorldRequestFactory, luanti_world_id: \Closure, job_id: string, operation: string, state: string, generation: int, base_url: string, world_identifier: \Closure, account_ids: \Closure, request_payload: \Closure}
+     * @return array{world_request_id: WorldRequestFactory, luanti_game_instance_id: \Closure, job_id: string, operation: string, state: string, generation: int, base_url: string, instance_identifier: \Closure, account_ids: \Closure, request_payload: \Closure}
      */
     public function definition(): array
     {
         return [
             'world_request_id' => WorldRequest::factory()->approved(),
-            'luanti_world_id' => fn (array $attributes): int => WorldRequest::query()->findOrFail($attributes['world_request_id'])->luanti_world_id,
+            'luanti_game_instance_id' => fn (array $attributes): int => WorldRequest::query()->findOrFail($attributes['world_request_id'])->current_game_instance_id,
             'job_id' => 'fixture-'.Str::uuid(),
             'operation' => 'grant',
             'state' => 'queued',
             'generation' => 1,
             'base_url' => 'https://bridge.example.test',
-            'world_identifier' => fn (array $attributes): string => LuantiWorld::query()->findOrFail($attributes['luanti_world_id'])->world_identifier,
+            'instance_identifier' => fn (array $attributes): string => LuantiGameInstance::query()->findOrFail($attributes['luanti_game_instance_id'])->instance_identifier,
             'account_ids' => function (array $attributes): array {
                 $account = LuantiAccount::factory()->create(['world_request_id' => $attributes['world_request_id']]);
-                LuantiAccountAssignment::factory()->create(['luanti_account_id' => $account->id, 'luanti_world_id' => $attributes['luanti_world_id']]);
+                LuantiAccountAssignment::factory()->create(['luanti_account_id' => $account->id, 'luanti_game_instance_id' => $attributes['luanti_game_instance_id']]);
 
                 return [$account->id];
             },

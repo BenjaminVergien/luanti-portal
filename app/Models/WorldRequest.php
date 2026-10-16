@@ -10,7 +10,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['name', 'luanti_world_id', 'start_date', 'end_date', 'participant_count'])]
+#[Fillable(['name', 'luanti_world_template_id', 'start_date', 'end_date', 'participant_count'])]
 class WorldRequest extends Model
 {
     /** @use HasFactory<WorldRequestFactory> */
@@ -34,12 +34,27 @@ class WorldRequest extends Model
 
     public function world(): BelongsTo
     {
-        return $this->belongsTo(LuantiWorld::class, 'luanti_world_id');
+        return $this->belongsTo(LuantiWorldTemplate::class, 'luanti_world_template_id');
     }
 
     public function decisionMaker(): BelongsTo
     {
         return $this->belongsTo(User::class, 'decided_by');
+    }
+
+    public function currentGameInstance(): BelongsTo
+    {
+        return $this->belongsTo(LuantiGameInstance::class, 'current_game_instance_id');
+    }
+
+    public function gameInstances(): HasMany
+    {
+        return $this->hasMany(LuantiGameInstance::class);
+    }
+
+    public function latestGameInstance(): ?LuantiGameInstance
+    {
+        return $this->gameInstances->where('is_archived', false)->sortByDesc('id')->first();
     }
 
     public function luantiAccounts(): HasMany

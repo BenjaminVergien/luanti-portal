@@ -2,10 +2,10 @@
 
 namespace App\Policies;
 
-use App\Models\LuantiWorld;
+use App\Models\LuantiWorldTemplate;
 use App\Models\User;
 
-class LuantiWorldPolicy
+class LuantiWorldTemplatePolicy
 {
     public function viewAny(User $user): bool
     {
@@ -17,7 +17,7 @@ class LuantiWorldPolicy
         return $this->viewAny($user);
     }
 
-    public function update(User $user, LuantiWorld $world): bool
+    public function update(User $user, LuantiWorldTemplate $world): bool
     {
         return $this->viewAny($user);
     }

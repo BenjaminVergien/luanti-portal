@@ -2,16 +2,16 @@
 
 namespace App\Console\Commands;
 
-use App\Services\LuantiWorldSynchronizer;
+use App\Services\LuantiWorldTemplateSynchronizer;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 
 #[Signature('luanti:worlds:sync {--server= : Synchronize only this configured server ID}')]
 #[Description('Synchronize saved Luanti maps from configured bridge APIs')]
-class SyncLuantiWorlds extends Command
+class SyncLuantiWorldTemplates extends Command
 {
-    public function handle(LuantiWorldSynchronizer $synchronizer): int
+    public function handle(LuantiWorldTemplateSynchronizer $synchronizer): int
     {
         $serverId = $this->option('server');
         if ($serverId !== null && (! ctype_digit((string) $serverId) || (int) $serverId < 1)) {

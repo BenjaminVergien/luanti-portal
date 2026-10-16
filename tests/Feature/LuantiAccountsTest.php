@@ -8,7 +8,7 @@ use App\Models\LuantiAccount;
 use App\Models\LuantiAccountAssignment;
 use App\Models\LuantiAccountJob;
 use App\Models\LuantiServer;
-use App\Models\LuantiWorld;
+use App\Models\LuantiWorldTemplate;
 use App\Models\OrganizationMembership;
 use App\Models\User;
 use App\Models\WorldRequest;
@@ -49,8 +49,8 @@ class LuantiAccountsTest extends TestCase
         $this->travelTo(Carbon::parse('2026-10-11 12:00:00', 'Europe/Berlin'));
         $this->actor = User::factory()->caseworker()->create();
         $server = LuantiServer::factory()->create(['api_base_url' => 'https://bridge.example.test/prefix/', 'api_token' => 'private-test-token']);
-        $world = LuantiWorld::factory()->create(['luanti_server_id' => $server->id, 'world_identifier' => 'dev']);
-        $this->worldRequest = WorldRequest::factory()->approved()->create(['luanti_world_id' => $world->id]);
+        $world = LuantiWorldTemplate::factory()->create(['luanti_server_id' => $server->id, 'template_identifier' => 'dev']);
+        $this->worldRequest = WorldRequest::factory()->approved()->create(['luanti_world_template_id' => $world->id]);
         $this->queueManager = Queue::getFacadeRoot();
         Queue::fake();
         Http::preventStrayRequests();
@@ -67,6 +67,9 @@ class LuantiAccountsTest extends TestCase
 
     private function preparedJob(): LuantiAccountJob
     {
+        $access = app(LuantiAccounts::class)->snapshot($this->worldRequest->fresh());
+        $access['generation'] = $this->worldRequest->fresh()->approved_access['generation'];
+        $this->worldRequest->forceFill(['approved_access' => $access])->save();
         app(LuantiAccounts::class)->create($this->actor, $this->worldRequest, $this->rows());
         app(LuantiAccounts::class)->reconcile($this->worldRequest->id);
 
@@ -77,7 +80,7 @@ class LuantiAccountsTest extends TestCase
     {
         $request = $this->worldRequest->fresh();
         app(WorldRequests::class)->update($this->actor, $request, [
-            ...$request->only(['name', 'participant_count']), 'luanti_world_id' => $worldId,
+            ...$request->only(['name', 'participant_count']), 'luanti_world_template_id' => $worldId,
             'start_date' => $request->start_date->toDateString(), 'end_date' => $endDate,
         ], $request->revision);
 
@@ -105,7 +108,7 @@ class LuantiAccountsTest extends TestCase
     {
         $payload = json_decode($job->request_payload, true, flags: JSON_THROW_ON_ERROR);
 
-        return ['version' => 1, 'world_id' => $job->world_identifier, 'job_id' => $job->job_id, 'state' => 'completed',
+        return ['version' => 1, 'world_id' => $job->instance_identifier, 'job_id' => $job->job_id, 'state' => 'completed',
             'result' => ['version' => 2, 'job_id' => $job->job_id, 'status' => $rejected === null ? 'ok' : 'partial',
                 'accounts' => array_map(fn (array $account): array => ['username' => $account['username'],
                     'status' => $account['username'] === $rejected ? 'rejected' : 'created',
@@ -175,12 +178,11 @@ class LuantiAccountsTest extends TestCase
         }
     }
 
-    public function test_world_name_reservations_are_case_insensitive_across_requests(): void
+    public function test_name_reservations_are_case_insensitive_within_one_game(): void
     {
         app(LuantiAccounts::class)->create($this->actor, $this->worldRequest, $this->rows());
-        $other = WorldRequest::factory()->approved()->create(['luanti_world_id' => $this->worldRequest->luanti_world_id]);
         $this->expectException(ValidationException::class);
-        app(LuantiAccounts::class)->create($this->actor, $other, [['username' => 'TEACHER_1', 'password' => 'Other-Password-123', 'role' => 'participant']]);
+        app(LuantiAccounts::class)->create($this->actor, $this->worldRequest, [['username' => 'TEACHER_1', 'password' => 'Other-Password-123', 'role' => 'participant']]);
     }
 
     public function test_secure_transport_uses_encrypted_exact_v2_bytes_and_berlin_exclusive_end(): void
@@ -197,7 +199,7 @@ class LuantiAccountsTest extends TestCase
         $this->assertArrayNotHasKey('request_payload', $job->toArray());
         $this->fakeHttp(['*' => function (Request $request, array $options) use ($job): PromiseInterface {
             $this->assertSame('POST', $request->method());
-            $this->assertSame('https://bridge.example.test/prefix/v1/worlds/dev/accounts/jobs', $request->url());
+            $this->assertSame($job->base_url.'/v1/worlds/'.$job->instance_identifier.'/accounts/jobs', $request->url());
             $this->assertSame($job->request_payload, $request->body());
             $this->assertTrue($request->hasHeader('Authorization', 'Bearer private-test-token'));
             $this->assertFalse($options['allow_redirects']);
@@ -285,12 +287,12 @@ class LuantiAccountsTest extends TestCase
     public function test_pending_job_is_polled_from_saved_world_after_service_restart(): void
     {
         $job = $this->preparedJob();
-        $this->fakeHttp(['*' => Http::response(['version' => 1, 'world_id' => 'dev', 'job_id' => $job->job_id, 'state' => 'pending', 'result_url' => 'https://evil.example/secret'], 202)]);
+        $this->fakeHttp(['*' => Http::response(['version' => 1, 'world_id' => $job->instance_identifier, 'job_id' => $job->job_id, 'state' => 'pending', 'result_url' => 'https://evil.example/secret'], 202)]);
         app(LuantiAccounts::class)->process($job->id);
         $this->assertSame('pending', $job->fresh()->state);
         $this->fakeHttp(['*' => function (Request $request) use ($job): PromiseInterface {
             $this->assertSame('GET', $request->method());
-            $this->assertSame('https://bridge.example.test/prefix/v1/worlds/dev/accounts/jobs/'.$job->job_id, $request->url());
+            $this->assertSame($job->base_url.'/v1/worlds/'.$job->instance_identifier.'/accounts/jobs/'.$job->job_id, $request->url());
 
             return Http::response($this->completed($job));
         }]);
@@ -319,7 +321,7 @@ class LuantiAccountsTest extends TestCase
         $this->fakeHttp(['*' => Http::response($this->completed($job))]);
         app(LuantiAccounts::class)->process($job->id);
         $previous = $this->worldRequest->fresh()->approved_access;
-        $data = [...$this->worldRequest->only(['name', 'luanti_world_id', 'participant_count']), 'start_date' => '2026-10-12', 'end_date' => '2026-10-21'];
+        $data = [...$this->worldRequest->only(['name', 'luanti_world_template_id', 'participant_count']), 'start_date' => '2026-10-12', 'end_date' => '2026-10-21'];
         app(WorldRequests::class)->update($this->actor, $this->worldRequest, $data, $this->worldRequest->fresh()->revision);
         $this->assertSame($previous, $this->worldRequest->fresh()->approved_access);
         app(LuantiAccounts::class)->reconcile($this->worldRequest->id);
@@ -381,11 +383,11 @@ class LuantiAccountsTest extends TestCase
     public function test_reapproval_waits_for_existing_pending_job_then_skips_intermediate_approved_windows(): void
     {
         $job = $this->preparedJob();
-        $this->fakeHttp(['*' => Http::response(['version' => 1, 'world_id' => 'dev', 'job_id' => $job->job_id, 'state' => 'pending'], 202)]);
+        $this->fakeHttp(['*' => Http::response(['version' => 1, 'world_id' => $job->instance_identifier, 'job_id' => $job->job_id, 'state' => 'pending'], 202)]);
         app(LuantiAccounts::class)->process($job->id);
         foreach (['2026-10-20', '2026-10-25'] as $endDate) {
             $current = $this->worldRequest->fresh();
-            app(WorldRequests::class)->update($this->actor, $current, [...$current->only(['name', 'luanti_world_id', 'participant_count']),
+            app(WorldRequests::class)->update($this->actor, $current, [...$current->only(['name', 'luanti_world_template_id', 'participant_count']),
                 'start_date' => '2026-10-11', 'end_date' => $endDate], $current->revision);
             app(WorldRequests::class)->decide($this->actor, $current->fresh(), true, $current->fresh()->revision);
             app(LuantiAccounts::class)->reconcile($this->worldRequest->id);
@@ -409,7 +411,7 @@ class LuantiAccountsTest extends TestCase
     /** @return array<string, array{bool, int}> */
     public static function supersedingApprovals(): array
     {
-        return ['new world' => [true, 1], 'new dates' => [false, 1], 'successive approvals' => [false, 2]];
+        return ['new dates' => [false, 1], 'successive approvals' => [false, 2]];
     }
 
     #[DataProvider('supersedingApprovals')]
@@ -417,8 +419,8 @@ class LuantiAccountsTest extends TestCase
     {
         $job = $this->preparedJob();
         $worldId = $switchWorld
-            ? LuantiWorld::factory()->create(['luanti_server_id' => $this->worldRequest->world->luanti_server_id])->id
-            : $job->luanti_world_id;
+            ? LuantiWorldTemplate::factory()->create(['luanti_server_id' => $this->worldRequest->world->luanti_server_id])->id
+            : $job->instance->luanti_world_template_id;
         $accounts = app(LuantiAccounts::class);
         for ($index = 0; $index < $approvals; $index++) {
             $current = $this->reapprove($worldId, '2026-10-'.(22 + $index));
@@ -430,7 +432,7 @@ class LuantiAccountsTest extends TestCase
             $accounts->reconcile($current->id);
             $job = LuantiAccountJob::query()->latest('id')->firstOrFail();
             $this->assertSame($current->approved_access['generation'], $job->generation);
-            $this->assertSame($worldId, $job->luanti_world_id);
+            $this->assertSame($current->current_game_instance_id, $job->luanti_game_instance_id);
         }
         $this->fakeHttp(['*' => function (Request $request) use ($job): PromiseInterface {
             $this->assertSame('POST', $request->method());
@@ -474,7 +476,7 @@ class LuantiAccountsTest extends TestCase
     {
         $job = $this->preparedJob();
         $approvedAccess = $this->worldRequest->fresh()->approved_access;
-        $this->changeRequest($job->luanti_world_id, '2026-10-22');
+        $this->changeRequest($job->instance->luanti_world_template_id, '2026-10-22');
         $this->fakeHttp(['*' => Http::response($this->completed($job))]);
         app(LuantiAccounts::class)->process($job->id);
         app(LuantiAccounts::class)->reconcile($this->worldRequest->id);
@@ -488,8 +490,7 @@ class LuantiAccountsTest extends TestCase
     /** @return array<string, array{bool, bool}> */
     public static function submittedSupersededJobs(): array
     {
-        return ['pending, changed dates' => [false, false], 'lost response, changed dates' => [true, false],
-            'pending, changed world' => [false, true], 'lost response, changed world' => [true, true]];
+        return ['pending, changed dates' => [false, false], 'lost response, changed dates' => [true, false]];
     }
 
     #[DataProvider('submittedSupersededJobs')]
@@ -497,20 +498,20 @@ class LuantiAccountsTest extends TestCase
     {
         $job = $this->preparedJob();
         $this->fakeHttp(['*' => $lostResponse ? Http::failedConnection()
-            : Http::response(['version' => 1, 'world_id' => 'dev', 'job_id' => $job->job_id, 'state' => 'pending'], 202)]);
+            : Http::response(['version' => 1, 'world_id' => $job->instance_identifier, 'job_id' => $job->job_id, 'state' => 'pending'], 202)]);
         $accounts = app(LuantiAccounts::class);
         $accounts->process($job->id);
         $this->assertNotNull($job->fresh()->submitted_at);
         $worldId = $switchWorld
-            ? LuantiWorld::factory()->create(['luanti_server_id' => $this->worldRequest->world->luanti_server_id])->id
-            : $job->luanti_world_id;
+            ? LuantiWorldTemplate::factory()->create(['luanti_server_id' => $this->worldRequest->world->luanti_server_id])->id
+            : $job->instance->luanti_world_template_id;
         $current = $this->reapprove($worldId, '2026-10-22');
         $accounts->reconcile($current->id);
         $this->assertDatabaseCount('luanti_account_jobs', 1);
         Queue::fake();
         $this->fakeHttp(['*' => function (Request $request) use ($job): PromiseInterface {
             $this->assertSame('GET', $request->method());
-            $this->assertSame($job->base_url.'/v1/worlds/'.$job->world_identifier.'/accounts/jobs/'.$job->job_id, $request->url());
+            $this->assertSame($job->base_url.'/v1/worlds/'.$job->instance_identifier.'/accounts/jobs/'.$job->job_id, $request->url());
             $this->assertSame('', $request->body());
 
             return Http::response($this->completed($job));
@@ -523,7 +524,7 @@ class LuantiAccountsTest extends TestCase
         $accounts->reconcile($current->id);
         $revoke = LuantiAccountJob::query()->latest('id')->firstOrFail();
         $this->assertSame('revoke', $revoke->operation);
-        $this->assertSame($job->luanti_world_id, $revoke->luanti_world_id);
+        $this->assertSame($job->luanti_game_instance_id, $revoke->luanti_game_instance_id);
         $this->assertSame($current->approved_access['generation'], $revoke->generation);
         $this->fakeHttp(['*' => Http::response($this->completed($revoke))]);
         $accounts->process($revoke->id);
@@ -531,7 +532,7 @@ class LuantiAccountsTest extends TestCase
         $accounts->reconcile($current->id);
         $grant = LuantiAccountJob::query()->latest('id')->firstOrFail();
         $this->assertSame('grant', $grant->operation);
-        $this->assertSame($worldId, $grant->luanti_world_id);
+        $this->assertSame($current->current_game_instance_id, $grant->luanti_game_instance_id);
         $this->assertSame($current->approved_access['ends_at'], json_decode($grant->request_payload, true)['accounts'][0]['access_window']['ends_at']);
         $this->assertDatabaseCount('luanti_account_jobs', 3);
     }
@@ -541,8 +542,8 @@ class LuantiAccountsTest extends TestCase
         $job = $this->preparedJob();
         $job->update(['state' => 'pending', 'submitted_at' => now()]);
         $approvedAccess = $this->worldRequest->fresh()->approved_access;
-        $this->changeRequest($job->luanti_world_id, '2026-10-22');
-        $current = $this->reapprove($job->luanti_world_id, '2026-10-18');
+        $this->changeRequest($job->instance->luanti_world_template_id, '2026-10-22');
+        $current = $this->reapprove($job->instance->luanti_world_template_id, '2026-10-18');
         $this->assertSame($approvedAccess['ends_at'], $current->approved_access['ends_at']);
         $this->fakeHttp(['*' => Http::response($this->completed($job))]);
         app(LuantiAccounts::class)->process($job->id);
@@ -558,11 +559,11 @@ class LuantiAccountsTest extends TestCase
         $this->fakeHttp(['*' => Http::response($this->completed($job))]);
         $accounts = app(LuantiAccounts::class);
         $accounts->process($job->id);
-        $this->reapprove($job->luanti_world_id, '2026-10-22');
+        $this->reapprove($job->instance->luanti_world_template_id, '2026-10-22');
         $accounts->reconcile($this->worldRequest->id);
         $revoke = LuantiAccountJob::query()->latest('id')->firstOrFail();
         $this->assertSame('revoke', $revoke->operation);
-        $this->reapprove($job->luanti_world_id, '2026-10-18');
+        $this->reapprove($job->instance->luanti_world_template_id, '2026-10-18');
         $accounts->process($revoke->id);
         $accounts->reconcile($this->worldRequest->id);
         $this->assertSame('cancelled', $revoke->fresh()->state);
@@ -594,7 +595,7 @@ class LuantiAccountsTest extends TestCase
     {
         $job = $this->preparedJob();
         $job->update(['state' => 'pending', 'submitted_at' => now()]);
-        $current = $this->reapprove($job->luanti_world_id, '2026-10-22');
+        $current = $this->reapprove($job->instance->luanti_world_template_id, '2026-10-22');
         $accounts = app(LuantiAccounts::class);
         $this->fakeHttp(['*' => Http::response($this->completed($job, 'Player-2', $code))]);
         $accounts->process($job->id);
@@ -620,7 +621,7 @@ class LuantiAccountsTest extends TestCase
     {
         $job = $this->preparedJob();
         $job->update(['submitted_at' => now()]);
-        $current = $this->reapprove($job->luanti_world_id, '2026-10-22');
+        $current = $this->reapprove($job->instance->luanti_world_template_id, '2026-10-22');
         $this->fakeHttp(['*' => function (Request $request): PromiseInterface {
             $this->assertSame('GET', $request->method());
 
@@ -655,7 +656,7 @@ class LuantiAccountsTest extends TestCase
     public function test_approval_waits_for_submission_lock_and_preserves_state_on_timeout(): void
     {
         $job = $this->preparedJob();
-        $request = $this->changeRequest($job->luanti_world_id, '2026-10-22');
+        $request = $this->changeRequest($job->instance->luanti_world_template_id, '2026-10-22');
         $attributes = $request->getRawOriginal();
         $lock = Cache::lock('luanti:accounts:process:'.$request->id, 60);
         $this->assertTrue($lock->get());
@@ -681,7 +682,7 @@ class LuantiAccountsTest extends TestCase
     public function test_approval_acquires_the_request_lock_before_starting_its_transaction(): void
     {
         $job = $this->preparedJob();
-        $request = $this->changeRequest($job->luanti_world_id, '2026-10-22');
+        $request = $this->changeRequest($job->instance->luanti_world_template_id, '2026-10-22');
         $transactionLevel = DB::transactionLevel();
         $lock = Cache::lock('luanti:accounts:process:'.$request->id, 60);
         $this->assertTrue($lock->get());
@@ -701,7 +702,7 @@ class LuantiAccountsTest extends TestCase
         $this->assertSame($job->generation + 1, $request->fresh()->approved_access['generation']);
     }
 
-    public function test_approval_releases_the_request_lock_before_dispatching_followup_work(): void
+    public function test_reapproval_defers_account_dispatch_until_game_schedule_is_reconciled(): void
     {
         $job = $this->preparedJob();
         Queue::getFacadeRoot()->releaseUniqueJobLocks();
@@ -714,9 +715,9 @@ class LuantiAccountsTest extends TestCase
                 $lock->release();
             }
         });
-        $this->reapprove($job->luanti_world_id, '2026-10-22');
+        $this->reapprove($job->instance->luanti_world_template_id, '2026-10-22');
         $this->assertSame('cancelled', $job->fresh()->state);
-        $this->assertDatabaseCount('jobs', 1);
+        $this->assertDatabaseCount('jobs', 0);
     }
 
     public function test_migration_preserves_legacy_active_jobs_as_potentially_submitted(): void
@@ -736,7 +737,7 @@ class LuantiAccountsTest extends TestCase
             $this->assertSame($state, $legacyJob->fresh()->state);
             $this->assertSame(in_array($state, ['pending', 'unknown'], true), $legacyJob->fresh()->submitted_at !== null);
         }
-        $this->reapprove($job->luanti_world_id, '2026-10-22');
+        $this->reapprove($job->instance->luanti_world_template_id, '2026-10-22');
         $this->fakeHttp(['*' => function (Request $request) use ($job): PromiseInterface {
             $this->assertSame('GET', $request->method());
 
@@ -746,32 +747,6 @@ class LuantiAccountsTest extends TestCase
         app(LuantiAccounts::class)->process($job->id);
         $this->assertTrue($job->fresh()->result['superseded']);
         $this->assertSame('completed', $job->fresh()->state);
-    }
-
-    public function test_stopped_old_world_pending_revocation_and_partial_failure_block_new_world_grant(): void
-    {
-        $job = $this->preparedJob();
-        $this->fakeHttp(['*' => Http::response($this->completed($job))]);
-        app(LuantiAccounts::class)->process($job->id);
-        $newWorld = LuantiWorld::factory()->create(['luanti_server_id' => $this->worldRequest->world->luanti_server_id]);
-        $current = $this->worldRequest->fresh();
-        app(WorldRequests::class)->update($this->actor, $current, [...$current->only(['name', 'participant_count']),
-            'luanti_world_id' => $newWorld->id, 'start_date' => '2026-10-11', 'end_date' => '2026-10-18'], $current->revision);
-        app(WorldRequests::class)->decide($this->actor, $current->fresh(), true, $current->fresh()->revision);
-        app(LuantiAccounts::class)->reconcile($this->worldRequest->id);
-        $revoke = LuantiAccountJob::query()->latest('id')->firstOrFail();
-        $this->assertSame('revoke', $revoke->operation);
-        $this->assertSame($job->luanti_world_id, $revoke->luanti_world_id);
-        $this->fakeHttp(['*' => Http::response(['version' => 1, 'world_id' => 'dev', 'job_id' => $revoke->job_id, 'state' => 'pending'], 202)]);
-        app(LuantiAccounts::class)->process($revoke->id);
-        app(LuantiAccounts::class)->reconcile($this->worldRequest->id);
-        $this->assertDatabaseCount('luanti_account_jobs', 2);
-        $this->fakeHttp(['*' => Http::response($this->completed($revoke, 'Player-2'))]);
-        app(LuantiAccounts::class)->process($revoke->id);
-        app(LuantiAccounts::class)->reconcile($this->worldRequest->id);
-        $this->assertDatabaseCount('luanti_account_jobs', 2);
-        $this->assertSame(1, LuantiAccountAssignment::query()->where('applied_admitted', true)->count());
-        $this->assertSame(0, LuantiAccountAssignment::query()->where('luanti_world_id', $newWorld->id)->where('applied_admitted', true)->count());
     }
 
     public function test_old_bridge_contract_rejection_requires_upgrade_without_raw_remote_content(): void
@@ -801,30 +776,6 @@ class LuantiAccountsTest extends TestCase
         });
     }
 
-    public function test_world_switch_collision_prevents_reapproval_and_preserves_original_access(): void
-    {
-        $job = $this->preparedJob();
-        $this->fakeHttp(['*' => Http::response($this->completed($job))]);
-        app(LuantiAccounts::class)->process($job->id);
-        $oldAccess = $this->worldRequest->fresh()->approved_access;
-        $otherWorld = LuantiWorld::factory()->create();
-        $otherRequest = WorldRequest::factory()->approved()->create(['luanti_world_id' => $otherWorld->id]);
-        app(LuantiAccounts::class)->create($this->actor, $otherRequest, [['username' => 'TEACHER_1', 'password' => 'Other-Password-123', 'role' => 'participant']]);
-        $current = $this->worldRequest->fresh();
-        app(WorldRequests::class)->update($this->actor, $current, [...$current->only(['name', 'participant_count']),
-            'luanti_world_id' => $otherWorld->id, 'start_date' => '2026-10-11', 'end_date' => '2026-10-18'], $current->revision);
-        try {
-            app(WorldRequests::class)->decide($this->actor, $current->fresh(), true, $current->fresh()->revision);
-            $this->fail('Expected target name collision.');
-        } catch (ValidationException $exception) {
-            $this->assertArrayHasKey('luanti_world_id', $exception->errors());
-        }
-        $this->assertSame($oldAccess, $this->worldRequest->fresh()->approved_access);
-        app(LuantiAccounts::class)->reconcile($this->worldRequest->id);
-        $this->assertDatabaseCount('luanti_account_jobs', 1);
-        $this->assertSame(2, LuantiAccountAssignment::query()->where('applied_admitted', true)->count());
-    }
-
     public function test_plain_http_configuration_sends_no_credentials(): void
     {
         $this->worldRequest->world->server->update(['api_base_url' => 'http://bridge.example.test']);
@@ -848,7 +799,7 @@ class LuantiAccountsTest extends TestCase
     public function test_unknown_retry_only_polls_existing_id_without_new_account_payload(): void
     {
         $job = $this->preparedJob();
-        $this->fakeHttp(['*' => Http::response(['version' => 1, 'world_id' => 'dev', 'job_id' => $job->job_id, 'state' => 'outcome_unknown'])]);
+        $this->fakeHttp(['*' => Http::response(['version' => 1, 'world_id' => $job->instance_identifier, 'job_id' => $job->job_id, 'state' => 'outcome_unknown'])]);
         app(LuantiAccounts::class)->process($job->id);
         $this->assertSame('unknown', $job->fresh()->state);
         app(LuantiAccounts::class)->retry($this->actor, $this->worldRequest);
@@ -874,7 +825,7 @@ class LuantiAccountsTest extends TestCase
         $this->assertTrue($uncertain->outcome_uncertain);
         $this->assertFalse($uncertain->is_provisioned);
         $current = $this->worldRequest->fresh();
-        app(WorldRequests::class)->update($this->actor, $current, [...$current->only(['name', 'luanti_world_id', 'participant_count']),
+        app(WorldRequests::class)->update($this->actor, $current, [...$current->only(['name', 'luanti_world_template_id', 'participant_count']),
             'start_date' => '2026-10-12', 'end_date' => '2026-10-22'], $current->revision);
         app(WorldRequests::class)->decide($this->actor, $current->fresh(), true, $current->fresh()->revision);
         app(LuantiAccounts::class)->retry($this->actor, $current->fresh());

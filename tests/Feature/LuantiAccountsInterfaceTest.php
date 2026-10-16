@@ -166,7 +166,7 @@ class LuantiAccountsInterfaceTest extends TestCase
         $request = WorldRequest::factory()->approved()->create();
         app(LuantiAccountService::class)->create($actor, $request, [['username' => 'Player', 'password' => 'Player-Password-123', 'role' => 'participant']]);
         $oldEnd = $request->fresh()->end_date->toDateString();
-        app(WorldRequestService::class)->update($actor, $request->fresh(), [...$request->only(['name', 'luanti_world_id', 'participant_count']),
+        app(WorldRequestService::class)->update($actor, $request->fresh(), [...$request->only(['name', 'luanti_world_template_id', 'participant_count']),
             'start_date' => $request->start_date->toDateString(), 'end_date' => $request->end_date->addDay()->toDateString()], $request->revision);
         $page = Livewire::test(LuantiAccounts::class, ['worldRequest' => $request->id])->assertSee('Zuletzt genehmigter Stand')
             ->assertDontSee('Anlegen und übertragen')->call('retryTransfers')->assertStatus(200);
@@ -198,7 +198,7 @@ class LuantiAccountsInterfaceTest extends TestCase
         app(LuantiAccountService::class)->create($actor, $request, [['username' => 'Reserved', 'password' => 'Player-Password-123', 'role' => 'participant']]);
         app(LuantiAccountService::class)->reconcile($request->id);
         $job = LuantiAccountJob::query()->sole();
-        Http::fake(['*' => Http::response(['version' => 1, 'world_id' => $job->world_identifier, 'job_id' => $job->job_id, 'state' => 'completed',
+        Http::fake(['*' => Http::response(['version' => 1, 'world_id' => $job->instance_identifier, 'job_id' => $job->job_id, 'state' => 'completed',
             'result' => ['version' => 2, 'job_id' => $job->job_id, 'status' => 'error', 'accounts' => [
                 ['username' => 'Reserved', 'status' => 'rejected', 'code' => 'existing_account'],
             ]]])]);

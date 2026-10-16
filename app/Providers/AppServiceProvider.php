@@ -36,5 +36,6 @@ class AppServiceProvider extends ServiceProvider
 
         Livewire::addPersistentMiddleware([EnsurePortalAccount::class, EnsureEmailIsVerified::class]);
         DevCommands::artisan('serve --host=127.0.0.1 --port=8000 --tries=1', 'server');
+        DevCommands::artisan('schedule:work', 'scheduler');
     }
 }

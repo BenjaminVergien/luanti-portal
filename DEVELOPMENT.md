@@ -13,7 +13,7 @@ Im Projektordner:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1
 ```
 
-Der Befehl startet den lokalen Webserver, den Queue-Worker und Vite zusammen.
+Der Befehl startet den lokalen Webserver, den Queue-Worker, den Scheduler und Vite zusammen.
 Mit `Strg+C` werden die Entwicklungsprozesse beendet.
 
 - Portal: http://127.0.0.1:8000/admin
@@ -25,7 +25,22 @@ Die interne Verwaltung steht unter `/admin`, der Einrichtungsbereich unter
 `/portal`. Fachkraefte registrieren sich unter `/portal/register`; ihre
 Zugangsseite ist `/zugang`. Der lokale Entwicklungsaccount ist Globaladmin.
 Einrichtungen, Mitgliedschaften, Beitrittsantraege und persoenliche Einladungen
-sind eingerichtet. Weltantraege, Serververwaltung und Luanti-Anbindung folgen.
+sind eingerichtet. Weltantraege waehlen veroeffentlichte Weltvorlagen; genehmigte
+Antraege erhalten private Spielkopien. Der Scheduler bereitet Kopien vor und
+gleicht ihre genehmigten Laufzeiten mit der Bridge ab.
+
+Die neue Vorlagen-/Instanzstruktur benoetigt bei bestehenden Entwicklungsdaten
+ein bewusstes Zuruecksetzen der bisherigen Weltantraege und Accountzuordnungen.
+Zuerst die lokale SQLite-Datei sichern, dann `luanti:worlds:reset-development
+--force` und `migrate` ueber `dev.ps1 artisan` ausfuehren. Benutzer, Einrichtungen
+und Serverkonfiguration bleiben erhalten. Server-Spielstaende werden nicht
+geloescht oder automatisch zu Vorlagen gemacht.
+
+Die Bridge benoetigt ihren aktualisierten installierten Controller und die
+aktualisierte HTTPS-API. Veroeffentlichung sauberer Vorlagen und Operator-Upgrade
+stehen in der benachbarten Bridge unter `docs/HTTPS_API.md`. Produktiv muss
+Laravel `schedule:run` einmal pro Minute ausgefuehrt werden; lokal uebernimmt
+der mit `dev.ps1` gestartete Scheduler diese Aufgabe.
 
 ## Befehle
 

@@ -4,8 +4,10 @@ namespace App\Filament\Pages;
 
 use App\Enums\WorldRequestStatus;
 use App\Models\LuantiAccount;
+use App\Models\LuantiWorldTemplate;
 use App\Models\Organization;
 use App\Models\WorldRequest;
+use App\Services\LuantiGameInstances;
 use App\Services\WorldRequests as WorldRequestService;
 use Closure;
 use Filament\Actions\Action;
@@ -70,8 +72,11 @@ class WorldRequests extends AccessTablePage
             ->defaultSort('created_at', 'desc')->columns([
                 TextColumn::make('organization.name')->label('Einrichtung')->searchable()->visible(fn (): bool => $this->isInternalPanel()),
                 TextColumn::make('name')->label('Name')->searchable()->sortable(),
-                TextColumn::make('world.name')->label('Welt')->searchable(),
+                TextColumn::make('world.name')->label('Weltvorlage')->searchable(),
                 TextColumn::make('world.server.name')->label('Server'),
+                TextColumn::make('currentGameInstance.instance_identifier')->label('Spielinstanz')->placeholder('Noch nicht vorbereitet'),
+                TextColumn::make('instance_status')->label('Spielstatus')->state(fn (WorldRequest $record): string => $record->latestGameInstance()?->statusLabel() ?? 'Wartet auf Genehmigung'),
+                TextColumn::make('preparation_error')->label('Vorbereitung')->state(fn (WorldRequest $record): ?string => $record->latestGameInstance()?->error ?? $record->currentGameInstance?->error)->wrap(),
                 TextColumn::make('start_date')->label('Startdatum')->date('d.m.Y')->sortable(),
                 TextColumn::make('end_date')->label('Enddatum')->date('d.m.Y')->sortable(),
                 TextColumn::make('participant_count')->label('Teilnehmende')->sortable(),
@@ -94,17 +99,38 @@ class WorldRequests extends AccessTablePage
                 Action::make('edit')->label('Bearbeiten')
                     ->visible(fn (WorldRequest $record): bool => Gate::forUser($this->actor())->allows('update', $record))
                     ->fillForm(fn (WorldRequest $record): array => [
-                        ...$record->only(['name', 'luanti_world_id', 'participant_count', 'revision']),
+                        ...$record->only(['name', 'luanti_world_template_id', 'participant_count', 'revision']),
                         'start_date' => $record->start_date->toDateString(), 'end_date' => $record->end_date->toDateString(),
                     ])
                     ->schema($this->requestFields(editing: true))
-                    ->modalDescription('Änderungen an Welt oder Zeitraum erfordern bei genehmigten Anträgen eine erneute Freigabe.')
+                    ->modalDescription('Änderungen am Zeitraum erfordern eine erneute Freigabe. Ein Vorlagenwechsel ist eine eigene Aktion und erstellt ein frisches Spiel.')
                     ->action(function (WorldRequest $record, array $data, Schema $schema): void {
                         $this->guardRecord($record);
                         $this->saveChange($schema, fn () => app(WorldRequestService::class)->update($this->actor(), $record, $data, (int) $data['revision']), 'Weltantrag gespeichert');
                     }),
                 $this->decisionAction('approve', 'Genehmigen', true),
                 $this->decisionAction('reject', 'Ablehnen', false),
+                Action::make('changeTemplate')->label('Weltvorlage wechseln')->requiresConfirmation()
+                    ->visible(fn (WorldRequest $record): bool => $record->status === WorldRequestStatus::Approved && Gate::forUser($this->actor())->allows('update', $record))
+                    ->modalDescription('Das bisherige Spiel wird archiviert. Die neue Welt startet ohne bisherigen Spielfortschritt. Spielnamen und Rollen bleiben erhalten; es gelten wieder die gespeicherten Startpasswörter. Genehmigung und Zeitraum bleiben bestehen.')
+                    ->fillForm(fn (WorldRequest $record): array => ['revision' => $record->revision])
+                    ->schema([Hidden::make('revision')->required(), Select::make('luanti_world_template_id')->label('Neue Weltvorlage')->required()
+                        ->options(fn (WorldRequest $record): array => LuantiWorldTemplate::query()
+                            ->where('luanti_server_id', $record->approved_access['server_id'])->where('is_available', true)->where('is_selectable', true)
+                            ->whereNotNull('revision')->whereKeyNot($record->luanti_world_template_id)->pluck('name', 'id')->all())])
+                    ->action(function (WorldRequest $record, array $data, Schema $schema): void {
+                        $this->guardRecord($record);
+                        $this->saveChange($schema, fn () => app(WorldRequestService::class)->changeTemplate($this->actor(), $record,
+                            (int) $data['luanti_world_template_id'], (int) $data['revision']), 'Neue Spielinstanz wird vorbereitet');
+                    }),
+                Action::make('retryGame')->label('Spielvorbereitung erneut prüfen')
+                    ->visible(fn (WorldRequest $record): bool => $record->approved_access !== null && Gate::forUser($this->actor())->allows('update', $record))
+                    ->action(function (WorldRequest $record): void {
+                        $this->guardRecord($record);
+                        Gate::forUser($this->actor())->authorize('update', $record);
+                        app(LuantiGameInstances::class)->retry($record);
+                        $this->saved('Spielvorbereitung wird erneut geprüft');
+                    }),
             ])->emptyStateHeading('Noch keine Weltanträge');
     }
 
@@ -149,11 +175,13 @@ class WorldRequests extends AccessTablePage
     {
         return [
             TextInput::make('name')->label('Name')->required()->maxLength(255),
-            Select::make('luanti_world_id')->label('Welt')->required()->searchable()
+            Select::make('luanti_world_template_id')->label('Weltvorlage')->required()->searchable()
+                ->disabled(fn (?WorldRequest $record): bool => $record?->current_game_instance_id !== null)->dehydrated()
                 ->options(fn (?WorldRequest $record): array => app(WorldRequestService::class)->worldOptions($this->actor(), $this->requestOrganization(), $record)),
             DatePicker::make('start_date')->label('Startdatum')->required()->native()->displayFormat('d.m.Y')->format('Y-m-d'),
             DatePicker::make('end_date')->label('Enddatum')->required()->native()->displayFormat('d.m.Y')->format('Y-m-d')->afterOrEqual('start_date'),
-            TextInput::make('participant_count')->label('Teilnehmendenzahl')->required()->integer()->minValue(1)->maxValue(4294967295),
+            TextInput::make('participant_count')->label('Teilnehmendenzahl')->required()->integer()->minValue(1)->maxValue(4294967295)
+                ->helperText('Voraussichtliche Zahl der Teilnehmenden für die Serverplanung.'),
             Hidden::make('revision')->required($editing)->rules(['nullable', 'integer', 'min:1']),
         ];
     }

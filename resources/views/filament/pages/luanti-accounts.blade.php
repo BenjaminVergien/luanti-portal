@@ -6,9 +6,17 @@
                 <strong>Aktueller Antrag:</strong> {{ $worldRequest->world->name }} / {{ $worldRequest->world->server->name }},
                 {{ $worldRequest->start_date->format('d.m.Y') }} bis einschließlich {{ $worldRequest->end_date->format('d.m.Y') }}.</p>
             @if ($approvedWorld)
-                <p><strong>Zuletzt genehmigter Stand:</strong> {{ $approvedWorld->name }} / {{ $approvedWorld->server->name }}, {{ $approvedWindow }}.</p>
+                <p><strong>Zuletzt genehmigter Stand:</strong> {{ $approvedWorld->label() }} / {{ $approvedWorld->server->name }}, {{ $approvedWindow }}.</p>
             @endif
-            <p>Bei Änderungen bleibt der bisher bestätigte Zugang gültig, bis seine Sperrung bestätigt ist. Erst danach wird der neue Zugang übertragen. Gestoppte Welten und ausstehende Rückmeldungen können die Übertragung verzögern.</p>
+            <p>Spielaccounts gelten nur für die private Spielinstanz. Archivierte Spielstände bleiben erhalten und sind nicht spielbar. Vorlagen enthalten keine Spielaccounts.</p>
+            @foreach ($worldRequest->gameInstances as $instance)
+                <p><strong>{{ $instance->label() }}</strong>
+                    @if ($instance->error)<br>{{ $instance->error }}@endif
+                </p>
+            @endforeach
+            @if ($approvedWorld)
+                <p><strong>Verbindung:</strong> {{ $approvedWorld->server->domain }}:{{ $approvedWorld->server->game_port }}</p>
+            @endif
         </div>
     </x-filament::section>
 

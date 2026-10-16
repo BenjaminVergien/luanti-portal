@@ -3,11 +3,11 @@
 namespace Database\Seeders;
 
 use App\Models\LuantiServer;
-use App\Models\LuantiWorld;
+use App\Models\LuantiWorldTemplate;
 use Illuminate\Database\Seeder;
 use RuntimeException;
 
-class LuantiWorldSeeder extends Seeder
+class LuantiWorldTemplateSeeder extends Seeder
 {
     public function run(): void
     {
@@ -16,7 +16,7 @@ class LuantiWorldSeeder extends Seeder
         }
         $this->call(LuantiServerSeeder::class);
         $server = LuantiServer::query()->where('name', 'Luanti-Beispielserver')->sole();
-        LuantiWorld::query()->firstOrCreate(['luanti_server_id' => $server->id, 'world_identifier' => 'beispielwelt'],
-            ['name' => 'Luanti-Beispielwelt', 'is_selectable' => true]);
+        LuantiWorldTemplate::query()->firstOrCreate(['luanti_server_id' => $server->id, 'template_identifier' => 'beispielwelt'],
+            ['name' => 'Luanti-Beispielvorlage (noch nicht veröffentlicht)', 'is_selectable' => false]);
     }
 }

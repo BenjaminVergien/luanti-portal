@@ -6,7 +6,7 @@ use App\Enums\WorldRequestStatus;
 use App\Models\LuantiAccount;
 use App\Models\LuantiAccountAssignment;
 use App\Models\LuantiAccountJob;
-use App\Models\LuantiWorld;
+use App\Models\LuantiGameInstance;
 use App\Models\Organization;
 use App\Models\WorldRequest;
 use App\Services\LuantiAccounts as LuantiAccountService;
@@ -112,7 +112,7 @@ class LuantiAccounts extends AccessTablePage
 
     public function table(Table $table): Table
     {
-        return $table->query(fn () => LuantiAccount::query()->where('world_request_id', $this->request()->id)->with('assignments.world.server', 'worldRequest'))
+        return $table->query(fn () => LuantiAccount::query()->where('world_request_id', $this->request()->id)->with('assignments.instance.server', 'worldRequest'))
             ->defaultSort('created_at', 'desc')->poll('10s')->columns([
                 TextColumn::make('username')->label('Spielname')->searchable(),
                 TextColumn::make('role')->label('Rolle')->formatStateUsing(fn (string $state): string => $state === 'facilitator' ? 'Fachkraft' : 'Mitglied'),
@@ -169,14 +169,14 @@ class LuantiAccounts extends AccessTablePage
         $request = $this->request();
 
         return ['worldRequest' => $request,
-            'approvedWorld' => $request->approved_access === null ? null : LuantiWorld::query()->with('server')->find($request->approved_access['world_id']),
+            'approvedWorld' => $request->approved_access === null ? null : LuantiGameInstance::query()->with('server')->find($request->approved_access['instance_id']),
             'approvedWindow' => $request->approved_access === null ? null : $this->formatWindow($request->approved_access),
             'recentJobs' => LuantiAccountJob::query()->where('world_request_id', $request->id)
-                ->select(['id', 'world_request_id', 'luanti_world_id', 'job_id', 'operation', 'state', 'error', 'created_at'])
-                ->with('world.server')->latest('id')->limit(20)->get()->map(fn (LuantiAccountJob $job): array => [
+                ->select(['id', 'world_request_id', 'luanti_game_instance_id', 'job_id', 'operation', 'state', 'error', 'created_at'])
+                ->with('instance.server')->latest('id')->limit(20)->get()->map(fn (LuantiAccountJob $job): array => [
                     'id' => $job->job_id,
-                    'world' => $job->world?->name ?? 'Welt nicht verfügbar',
-                    'server' => $job->world?->server?->name ?? 'Server nicht verfügbar',
+                    'world' => $job->instance?->instance_identifier ?? 'Spielinstanz nicht verfügbar',
+                    'server' => $job->instance?->server?->name ?? 'Server nicht verfügbar',
                     'operation' => $job->operation === 'revoke' ? 'Sperrung' : 'Freigabe',
                     'state' => match ($job->state) {
                         'queued' => 'Für Übertragung vorbereitet', 'pending' => 'Wartet auf Bridge-Bestätigung',
@@ -192,7 +192,7 @@ class LuantiAccounts extends AccessTablePage
     private function request(): WorldRequest
     {
         abort_unless(static::canAccess(), 403);
-        $request = WorldRequest::query()->with('world.server', 'organization')->findOrFail($this->worldRequestId);
+        $request = WorldRequest::query()->with('world.server', 'currentGameInstance.server', 'organization')->findOrFail($this->worldRequestId);
         abort_if(! $this->isInternalPanel() && $request->organization_id !== Filament::getTenant()->id, 404);
         abort_unless($request->status === WorldRequestStatus::Approved || $request->approved_access !== null
             || LuantiAccount::query()->where('world_request_id', $request->id)->exists(), 404);
@@ -201,17 +201,17 @@ class LuantiAccounts extends AccessTablePage
         return $request;
     }
 
-    /** @param array{world_id: int, starts_at: int, ends_at: int, generation: int}|null $approvedAccess */
+    /** @param array{instance_id: int, starts_at: int, ends_at: int, generation: int}|null $approvedAccess */
     private function assignmentSummary(LuantiAccountAssignment $assignment, ?array $approvedAccess): string
     {
-        $world = $assignment->world?->name ?? 'Welt nicht verfügbar';
-        $server = $assignment->world?->server?->name ?? 'Server nicht verfügbar';
+        $world = $assignment->instance?->instance_identifier ?? 'Spielinstanz nicht verfügbar';
+        $server = $assignment->instance?->server?->name ?? 'Server nicht verfügbar';
         $state = $assignment->applied_window === null ? 'Übertragung wartet auf Bestätigung'
             : ($assignment->applied_admitted ? 'Bisher bestätigter Zugang: '.$this->formatWindow($assignment->applied_window) : 'Sperrung bestätigt');
         if ($assignment->outcome_uncertain) {
             $state = 'Technischer Fehler mit möglicherweise angewendeten Änderungen; Bestätigung ausstehend';
         }
-        if ($assignment->applied_admitted && $assignment->applied_window !== null && $approvedAccess !== null && ($assignment->luanti_world_id !== $approvedAccess['world_id']
+        if ($assignment->applied_admitted && $assignment->applied_window !== null && $approvedAccess !== null && ($assignment->luanti_game_instance_id !== $approvedAccess['instance_id']
             || $assignment->applied_window['starts_at'] !== $approvedAccess['starts_at'] || $assignment->applied_window['ends_at'] !== $approvedAccess['ends_at'])) {
             $state = 'Sperrung ausstehend · '.$state;
         }

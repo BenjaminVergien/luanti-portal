@@ -21,8 +21,8 @@ class LuantiServer extends Model
         return ['game_port' => 'integer', 'api_token' => 'encrypted', 'worlds_synced_at' => 'datetime'];
     }
 
-    public function worlds(): HasMany
+    public function templates(): HasMany
     {
-        return $this->hasMany(LuantiWorld::class);
+        return $this->hasMany(LuantiWorldTemplate::class);
     }
 }
