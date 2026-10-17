@@ -39,7 +39,7 @@ class WorldRequests
             abort_if($organization !== null && $request->organization_id !== $organization->id, 404);
         }
 
-        return LuantiWorldTemplate::query()->with('server')
+        return LuantiWorldTemplate::query()->with('server')->whereNotNull('luanti_server_id')
             ->where(fn (Builder $query): Builder => $query->where(fn (Builder $query): Builder => $query->where('is_selectable', true)->where('is_available', true))
                 ->when($request !== null, fn (Builder $query): Builder => $query->orWhereKey($request->luanti_world_template_id)))
             ->orderBy('name')->get()->mapWithKeys(fn (LuantiWorldTemplate $world): array => [
@@ -166,7 +166,7 @@ class WorldRequests
     private function checkWorld(int|string $worldId, bool $requireSelectable): void
     {
         $world = LuantiWorldTemplate::query()->whereKey($worldId)->lockForUpdate()->first();
-        if ($world === null || ($requireSelectable && (! $world->is_selectable || ! $world->is_available))) {
+        if ($world === null || $world->luanti_server_id === null || ($requireSelectable && (! $world->is_selectable || ! $world->is_available))) {
             throw ValidationException::withMessages(['luanti_world_template_id' => 'Bitte wähle eine aktuell beantragbare Welt.']);
         }
     }

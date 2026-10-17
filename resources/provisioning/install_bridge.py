@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import stat
 import subprocess
@@ -60,10 +61,62 @@ def unpack(raw, digest, destination, source):
         return manifest
 
 
-def installation_settings(payload, metadata, game):
+def installation_settings(payload, metadata, game, templates=None):
     public = bool(payload.get('hostname'))
     return {'image': metadata['image'], 'game_source': str(game), 'admin_name': payload['admin_name'],
-            'hostname': payload['hostname'] if public else 'localhost', 'development': not public}
+            'hostname': payload['hostname'] if public else 'localhost', 'development': not public,
+            'templates': templates or {}}
+
+
+def template_identity(payload):
+    templates = payload.get('templates', {})
+    if not isinstance(templates, dict) or len(templates) > 1000:
+        raise ValueError('Invalid portal template catalogue')
+    result = {}
+    for identifier, entry in templates.items():
+        if (not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,32}', identifier)
+                or not isinstance(entry, dict) or set(entry) != {'revision', 'sha256', 'archive'}
+                or any(not isinstance(entry[key], str) or not re.fullmatch(r'[0-9a-f]{64}', entry[key])
+                       for key in ('revision', 'sha256'))
+                or not isinstance(entry['archive'], str)):
+            raise ValueError('Invalid portal template identity')
+        result[identifier] = {key: entry[key] for key in ('revision', 'sha256')}
+    return result
+
+
+def unpack_templates(payload, destination, inspect_bundle):
+    identity = template_identity(payload)
+    result, total, expanded = {}, 0, 0
+    allowed = {'manifest.json', 'world.mt', 'map.sqlite', 'map_meta.txt', 'env_meta.txt', 'mod_storage.sqlite'}
+    for identifier, expected in identity.items():
+        raw = base64.b64decode(payload['templates'][identifier]['archive'], validate=True)
+        total += len(raw)
+        if total > 67108864 or hashlib.sha256(raw).hexdigest() != expected['sha256']:
+            raise ValueError('Portal template upload checksum or size mismatch')
+        target = destination / identifier
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            entries = archive.infolist()
+            names = [entry.filename for entry in entries]
+            expanded += sum(entry.file_size for entry in entries)
+            if (not {'manifest.json', 'world.mt', 'map.sqlite'} <= set(names)
+                    or set(names) - allowed or len(names) != len(set(names))
+                    or expanded > 134217728):
+                raise ValueError('Only clean published template files can be commissioned')
+            for entry in entries:
+                if (entry.orig_filename != entry.filename or entry.file_size > 67108864
+                        or entry.external_attr >> 16 & 0o170000 not in (0, 0o100000)
+                        or entry.flag_bits & 1):
+                    raise ValueError('Unsafe portal template member')
+            target.mkdir(mode=0o755)
+            for entry in entries:
+                path = target / entry.filename
+                path.write_bytes(archive.read(entry))
+                path.chmod(0o644)
+        manifest = inspect_bundle(target, {0})
+        if manifest['template_id'] != identifier or manifest['revision'] != expected['revision']:
+            raise ValueError('Portal template differs from its pinned revision')
+        result[identifier] = str(target)
+    return result
 
 
 def main(payload):
@@ -80,6 +133,9 @@ def main(payload):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         active = base / 'active.json'
         identity = {key: payload[key] for key in ('commit', 'source_sha256', 'game_archive_sha256', 'image_id', 'admin_name')}
+        templates_identity = template_identity(payload)
+        if templates_identity:
+            identity['templates'] = templates_identity
         if payload.get('hostname'):
             identity['hostname'] = payload['hostname']
         if active.exists() and json.loads(active.read_text()) != identity:
@@ -96,9 +152,13 @@ def main(payload):
                        check=True, stdout=log, stderr=log, timeout=300, env=dict(os.environ, DEBIAN_FRONTEND='noninteractive'))
         sys.path.insert(0, str(stage / 'source'))
         from lifecycle.install_docker import install
+        from lifecycle.templates import inspect_bundle
         from api.security import read_regular, atomic_private
         public = bool(payload.get('hostname'))
-        settings = installation_settings(payload, metadata, stage / 'game')
+        templates_root = stage / 'templates'
+        templates_root.mkdir(mode=0o755)
+        templates = unpack_templates(payload, templates_root, inspect_bundle)
+        settings = installation_settings(payload, metadata, stage / 'game', templates)
         if public and active.exists():
             result = {'image_id': metadata['image_id']}
         else:
@@ -141,9 +201,20 @@ def main(payload):
                 time.sleep(1)
         if not ready:
             raise ValueError('The installed bridge API did not pass its authenticated HTTPS check')
+        commissioned = {identifier: entry['revision'] for identifier, entry in templates_identity.items()}
+        if commissioned:
+            probe = urllib.request.Request(origin + '/v1/world-templates', headers={'Authorization': 'Bearer ' + token})
+            with client.open(probe, timeout=8) as response:
+                raw = response.read(262145)
+            catalogue = json.loads(raw) if len(raw) <= 262144 else {}
+            if catalogue.get('version') != 1:
+                raise ValueError('Installed template catalogue is invalid')
+            discovered = {entry['template_id']: entry['revision'] for entry in catalogue.get('templates', [])}
+            if any(discovered.get(identifier) != revision for identifier, revision in commissioned.items()):
+                raise ValueError('Installed template catalogue differs from the portal snapshot')
         atomic_private(active, (json.dumps(identity) + '\n').encode(), owner=0, group=0)
         return dict(ok=True, commit=payload['commit'], source_sha256=payload['source_sha256'],
-                    image_id=result['image_id'], token=token, ca_certificate=certificate)
+                    image_id=result['image_id'], token=token, ca_certificate=certificate, templates=commissioned)
     except Exception:
         if log is not None:
             traceback.print_exc(file=log)

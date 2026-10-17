@@ -9,7 +9,6 @@ use App\Services\HetznerVirtualMachines;
 use App\Services\LuantiApiConnectionChecker;
 use App\Services\LuantiDockerInstallation;
 use App\Services\LuantiServerRegistry;
-use App\Services\LuantiWorldTemplateSynchronizer;
 use App\Services\PortalSettings;
 use App\Services\ProvisionedBridgeTransport;
 use App\Services\PublicEndpointPendingException;
@@ -95,8 +94,7 @@ class LuantiServers extends AccessTablePage
     {
         return $table->query(fn () => app(LuantiServerRegistry::class)->query($this->actor()))->poll('10s')
             ->stackedOnMobile()->recordAction('details')->columns([
-                TextColumn::make('name')->label('Name')->searchable()->sortable()->wrap()->weight('medium')
-                    ->description(fn (LuantiServer $record): ?string => filled($record->world_sync_error) ? 'Weltvorlagen: Fehler · siehe Details' : null),
+                TextColumn::make('name')->label('Name')->searchable()->sortable()->wrap()->weight('medium'),
                 TextColumn::make('domain')->label('Domain')->placeholder('Noch nicht eingerichtet')->sortable()->wrap(),
                 TextColumn::make('hetzner_status')->label('VM')->wrap()
                     ->getStateUsing(fn (LuantiServer $record): string => $record->hetznerStatusLabel())
@@ -132,8 +130,6 @@ class LuantiServers extends AccessTablePage
                         && $state === ProvisionedBridgeTransport::origin($record) ? 'Privat über SSH' : $state)->toggleable(isToggledHiddenByDefault: true),
                 IconColumn::make('has_api_token')->label('API-Token hinterlegt')
                     ->getStateUsing(fn (LuantiServer $record): bool => filled($record->getRawOriginal('api_token')))->boolean()->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('worlds_synced_at')->label('Weltvorlagen synchronisiert')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('Noch nicht synchronisiert')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('world_sync_error')->label('Letzter Synchronisierungsfehler')->placeholder('–')->wrap()->toggleable(isToggledHiddenByDefault: true),
             ])->recordActions([ActionGroup::make([
                 Action::make('retryDnsCleanup')->label('DNS-Bereinigung erneut versuchen')
                     ->visible(fn (LuantiServer $record): bool => $record->dns_cleanup_pending && $record->hetzner_status === 'deleted')
@@ -195,10 +191,6 @@ class LuantiServers extends AccessTablePage
                         && $record->hetzner_status !== 'deleted')
                     ->action(function (LuantiServer $record): void {
                         $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->delete($this->actor(), $record));
-                    }),
-                Action::make('syncWorlds')->label('Weltvorlagen synchronisieren')
-                    ->action(function (LuantiServer $record): void {
-                        $this->notifyConnectionResult(app(LuantiWorldTemplateSynchronizer::class)->sync($this->actor(), $record));
                     }),
                 Action::make('checkConnection')->label('API-Verbindung prüfen')
                     ->action(function (LuantiServer $record): void {
@@ -295,8 +287,6 @@ class LuantiServers extends AccessTablePage
                         && $state === ProvisionedBridgeTransport::origin($record) ? 'Privat über SSH' : $state),
                 TextEntry::make('has_api_token')->label('API-Token hinterlegt')
                     ->state(fn (LuantiServer $record): string => filled($record->getRawOriginal('api_token')) ? 'Ja' : 'Nein'),
-                TextEntry::make('worlds_synced_at')->label('Weltvorlagen synchronisiert')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('Noch nicht synchronisiert'),
-                TextEntry::make('world_sync_error')->label('Letzter Synchronisierungsfehler')->placeholder('–')->color('danger')->columnSpanFull(),
             ]),
         ];
     }

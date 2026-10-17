@@ -16,9 +16,11 @@ work. Other missing capabilities are listed as known limitations.
 - Registration, email verification, organization creation/memberships, join requests,
   personal invitations, account administration and organization verification
   with verification time and actor.
-- Global-admin server management: game hostname/port, encrypted bridge token,
-  HTTPS connection check and published-template synchronization. Failed catalogue
-  fetches retain the previous list; missing templates become unavailable.
+- Global-admin server management: game hostname/port, encrypted bridge token
+  and HTTPS connection checks. Published template ZIPs live in the portal's
+  private library. New automatically provisioned servers receive every template
+  from the library snapshot taken at creation; installation verifies their hashes
+  and revisions before registering the commissioned server copies.
 - Organization world requests, internal approval/rejection and non-overlapping
   reservations per server. Approved requests receive a private game instance
   copied from a published template revision, with separate accounts and saves.
@@ -62,7 +64,8 @@ roster using stored initial passwords. Passwords changed inside the old game
 are not transferred. Expiry stops a game and retains its save; archival prevents
 reactivation and also retains the save.
 
-The portal uses `/v1/world-templates` and account/lifecycle job endpoints. HTTP
+The installer verifies commissioned templates through `/v1/world-templates`;
+the portal uses account/lifecycle job endpoints for private games. HTTP
 envelopes remain v1 while portal account and instance payloads/results use v2.
 See the bridge's [integration contract](../civicrm_bridge/docs/INTEGRATION.md)
 and [HTTPS API/deployment guide](../civicrm_bridge/docs/HTTPS_API.md). These sibling
@@ -102,8 +105,10 @@ transport, a durable queue worker and `schedule:run` every minute. Portal-genera
 links use the configured application origin. Retain database/queue state and a
 shared lock-capable cache across workers. Back up the database and application
 key privately: bridge tokens, initial passwords, provisioning keys and bootstrap
-data depend on that key. Bridge world, registry and receipt backups are separate
-from source control. See the bridge guide for service identities and permissions.
+data depend on that key. Back up `storage/app/private/world-templates` with the portal database; retained
+archives are needed to retry pinned server installations. Library updates apply
+to future server creation and preserve existing server copies. Bridge world,
+registry and receipt backups are separate from source control. See the bridge guide for service identities and permissions.
 
 ## Known limitations
 

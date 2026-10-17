@@ -12,7 +12,6 @@ use App\Services\BridgeHttpClient;
 use App\Services\LuantiAccounts;
 use App\Services\LuantiGameInstances;
 use App\Services\LuantiSshClient;
-use App\Services\LuantiWorldTemplateSynchronizer;
 use App\Services\WorldRequests;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
@@ -60,20 +59,21 @@ directory(source)
 (source/'world.mt').write_text('gameid = minetest\nbackend = sqlite3\nauth_backend = sqlite3\nload_mod_civicrm_bridge = mods/civicrm_bridge\n')
 with closing(sqlite3.connect(source/'map.sqlite')) as db:
  db.execute('CREATE TABLE blocks (pos INTEGER PRIMARY KEY, data BLOB)')
-publish(source,fixture/'published',TEMPLATE_ID,'Explicit Docker end-to-end test')
+manifest=publish(source,fixture/'published',TEMPLATE_ID,'Explicit Docker end-to-end test')
 settings={key:value for key,value in active['settings'].items() if key!='game_sha256'}
 settings['templates']={TEMPLATE_ID:str(fixture/'published')}
 result=install(settings,apply=True)
 import subprocess
 subprocess.run(['/usr/bin/systemctl','start','civicrm-bridge-development-proxy.service'],check=True,capture_output=True,timeout=15)
-print(json.dumps({'ok':result['applied']}))
+print(json.dumps({'ok':result['applied'], 'template':{key:manifest[key] for key in ('template_id','name','revision')}}))
 PY;
-        $this->assertTrue(json_decode($ssh->execute($remote, $setup, 600), true, flags: JSON_THROW_ON_ERROR)['ok']);
+        $receipt = json_decode($ssh->execute($remote, $setup, 600), true, flags: JSON_THROW_ON_ERROR);
+        $this->assertTrue($receipt['ok']);
         $actor = User::factory()->globalAdmin()->create();
         $server = LuantiServer::factory()->create(['api_base_url' => $remote->api_base_url, 'api_token' => $remote->api_token]);
         $instanceId = null;
         try {
-            $ssh->tunnel($remote, function () use ($actor, $server, $templateId, &$instanceId): void {
+            $ssh->tunnel($remote, function () use ($actor, $server, $templateId, $receipt, &$instanceId): void {
                 $http = app(BridgeHttpClient::class);
                 $this->assertSame(401, $http->send('GET', $server->api_base_url.'/v1/world-templates', str_repeat('z', 43), 5)->status());
                 $certificate = config('services.bridge_development.ca_certificate');
@@ -86,9 +86,10 @@ PY;
                 } finally {
                     config(['services.bridge_development.ca_certificate' => $certificate]);
                 }
-                $sync = app(LuantiWorldTemplateSynchronizer::class)->sync($actor, $server);
-                $this->assertTrue($sync['successful'], $sync['body']);
-                $template = $server->templates()->where('template_identifier', $templateId)->firstOrFail();
+                $this->assertSame($templateId, $receipt['template']['template_id']);
+                $template = $server->templates()->create(['template_identifier' => $templateId,
+                    'name' => $receipt['template']['name'], 'revision' => $receipt['template']['revision'], 'is_selectable' => true]);
+                $template->forceFill(['is_available' => true, 'commissioned_at' => now()])->save();
                 $organization = Organization::factory()->create();
                 $applicant = User::factory()->create();
                 OrganizationMembership::factory()->create(['organization_id' => $organization->id, 'user_id' => $applicant->id]);

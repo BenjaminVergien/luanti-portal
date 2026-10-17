@@ -30,6 +30,7 @@ class BridgeProvisioning
         if ($this->settings->luantiDockerImage() === null) {
             throw ValidationException::withMessages(['bridge' => 'Für die automatische Bridge-Installation bitte ein Luanti-Image auswählen.']);
         }
+        $templates = app(PortalWorldTemplates::class)->snapshot();
         $game = $this->source->game($settings['bridge_game_source'] ?? '');
         $commit = $this->source->resolve($settings['bridge_repository'], $settings['bridge_ref']);
         $bundle = $this->source->bundle($settings['bridge_repository'], $commit);
@@ -37,7 +38,8 @@ class BridgeProvisioning
         $gameHash = $this->retain($game);
 
         return ['commit' => $commit, 'configuration' => ['repository' => $settings['bridge_repository'], 'ref' => $settings['bridge_ref'],
-            'admin_name' => $settings['bridge_admin_name'], 'source_sha256' => $bundle['source_sha256'], 'source_archive_sha256' => $archive, 'game_archive_sha256' => $gameHash]];
+            'admin_name' => $settings['bridge_admin_name'], 'source_sha256' => $bundle['source_sha256'], 'source_archive_sha256' => $archive,
+            'game_archive_sha256' => $gameHash, 'templates' => $templates]];
     }
 
     public function retry(User $actor, LuantiServer $server): void
@@ -127,6 +129,12 @@ class BridgeProvisioning
                         'source_archive_sha256' => $configuration['source_archive_sha256'], 'game_archive_sha256' => $configuration['game_archive_sha256'],
                         'source' => base64_encode($this->artifact($configuration['source_archive_sha256'])),
                         'game' => base64_encode($this->artifact($configuration['game_archive_sha256']))];
+                    $expectedTemplates = [];
+                    foreach ($configuration['templates'] ?? [] as $template) {
+                        $payload['templates'][$template['template_id']] = ['revision' => $template['revision'], 'sha256' => $template['bundle_sha256'],
+                            'archive' => base64_encode(File::get(app(PortalWorldTemplates::class)->artifact($template['bundle_sha256'])))];
+                        $expectedTemplates[$template['template_id']] = $template['revision'];
+                    }
                     if ($public) {
                         $payload['hostname'] = $server->public_hostname;
                     }
@@ -136,6 +144,7 @@ class BridgeProvisioning
                     $response = json_decode($this->ssh->execute($server, $script, 900, 65536), true, flags: JSON_THROW_ON_ERROR);
                     if (($response['ok'] ?? false) !== true || ($response['commit'] ?? null) !== $server->bridge_commit
                         || ($response['source_sha256'] ?? null) !== $configuration['source_sha256'] || ($response['image_id'] ?? null) !== $server->luanti_image_id
+                        || ($expectedTemplates !== [] && ($response['templates'] ?? null) !== $expectedTemplates)
                         || ! preg_match('/\A[A-Za-z0-9_-]{43}\z/', $response['token'] ?? '')
                         || (! $public && (! is_string($response['ca_certificate'] ?? null) || strlen($response['ca_certificate']) > 16384
                         || openssl_x509_read($response['ca_certificate']) === false))) {
@@ -153,6 +162,7 @@ class BridgeProvisioning
                     app(PublicHttpsProvisioning::class)->configure($server);
                 }
                 Gate::forUser(app(PortalAccess::class)->currentUser($actor))->authorize('update', $server);
+                app(PortalWorldTemplates::class)->registerCommissioned($server, $configuration['templates'] ?? []);
                 $server->forceFill(['bridge_status' => 'installed', 'bridge_error' => null, 'bridge_installed_at' => now(),
                     'bridge_source_sha256' => $configuration['source_sha256'], 'bridge_ca_certificate' => $public ? null : $response['ca_certificate'],
                     'api_token' => $public ? $server->api_token : $response['token'],

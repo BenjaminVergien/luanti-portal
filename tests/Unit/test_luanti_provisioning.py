@@ -25,6 +25,74 @@ def load(name):
 
 
 class LuantiProvisioningTest(unittest.TestCase):
+    def template_payload(self, identifier='dev', files=None):
+        files = files or {'manifest.json': '{}', 'world.mt': 'settings', 'map.sqlite': 'map'}
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for name, value in files.items():
+                archive.writestr(name, value)
+        raw = buffer.getvalue()
+        return {'templates': {identifier: {'revision': 'a' * 64, 'sha256': hashlib.sha256(raw).hexdigest(),
+                                           'archive': base64.b64encode(raw).decode()}}}
+
+    def test_portal_templates_are_extracted_validated_and_supplied_to_the_installer(self):
+        module = load('install_bridge')
+        payload = self.template_payload()
+        inspector = MagicMock(return_value={'template_id': 'dev', 'revision': 'a' * 64})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            templates = module.unpack_templates(payload, root, inspector)
+            inspector.assert_called_once_with(root / 'dev', {0})
+            self.assertEqual({'dev': str(root / 'dev')}, templates)
+            self.assertEqual('map', (root / 'dev/map.sqlite').read_text())
+            settings = module.installation_settings({'admin_name': 'Administrator'}, {'image': IMAGE}, root / 'game', templates)
+            self.assertEqual(templates, settings['templates'])
+        self.assertEqual({'dev': {'revision': 'a' * 64, 'sha256': payload['templates']['dev']['sha256']}}, module.template_identity(payload))
+
+    def test_portal_template_import_rejects_traversal_private_state_and_wrong_identity(self):
+        module = load('install_bridge')
+        for extra in ('../outside', 'auth.sqlite', 'players/name', 'world.mt/child'):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as temporary:
+                payload = self.template_payload(files={'manifest.json': '{}', 'world.mt': 'settings', 'map.sqlite': 'map', extra: 'unsafe'})
+                inspector = MagicMock()
+                with self.assertRaises(ValueError):
+                    module.unpack_templates(payload, Path(temporary), inspector)
+                inspector.assert_not_called()
+        with self.assertRaises(ValueError):
+            module.template_identity(self.template_payload(identifier='../escape'))
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(ValueError):
+            module.unpack_templates(self.template_payload(), Path(temporary), lambda *args: {'template_id': 'dev', 'revision': 'b' * 64})
+
+    def test_portal_template_upload_checksum_and_member_types_are_enforced(self):
+        module = load('install_bridge')
+        payload = self.template_payload()
+        payload['templates']['dev']['sha256'] = 'b' * 64
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(ValueError):
+            module.unpack_templates(payload, Path(temporary), MagicMock())
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w') as archive:
+            archive.writestr('manifest.json', '{}')
+            archive.writestr('world.mt', 'settings')
+            entry = zipfile.ZipInfo('map.sqlite')
+            entry.create_system = 3
+            entry.external_attr = 0o120777 << 16
+            archive.writestr(entry, '/outside')
+        raw = buffer.getvalue()
+        payload = {'templates': {'dev': {'revision': 'a' * 64, 'sha256': hashlib.sha256(raw).hexdigest(),
+                                        'archive': base64.b64encode(raw).decode()}}}
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(ValueError):
+            module.unpack_templates(payload, Path(temporary), MagicMock())
+
+    def test_portal_template_identity_retains_all_worlds_and_existing_no_template_payloads(self):
+        module = load('install_bridge')
+        self.assertEqual({}, module.template_identity({}))
+        payload = self.template_payload()
+        payload['templates'].update(self.template_payload(identifier='test')['templates'])
+        self.assertEqual({'dev', 'test'}, set(module.template_identity(payload)))
+        for invalid in ([], {'dev': {'archive': '', 'sha256': 'a' * 64, 'revision': '../revision'}}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                module.template_identity({'templates': invalid})
+
     def test_public_bridge_uses_real_hostname_without_development_proxy(self):
         module = load('install_bridge')
         payload = {'admin_name': 'Administrator', 'hostname': 'amber-otter.bensfoundry.de'}

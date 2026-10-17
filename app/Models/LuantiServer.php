@@ -19,7 +19,7 @@ class LuantiServer extends Model
     protected function casts(): array
     {
         return [
-            'game_port' => 'integer', 'api_token' => 'encrypted', 'worlds_synced_at' => 'datetime',
+            'game_port' => 'integer', 'api_token' => 'encrypted',
             'hetzner_server_id' => 'integer', 'hetzner_ssh_key_id' => 'integer',
             'provisioning_private_key' => 'encrypted', 'hetzner_create_payload' => 'array',
             'provisioning_cloud_config' => 'encrypted', 'luanti_verified_at' => 'datetime',

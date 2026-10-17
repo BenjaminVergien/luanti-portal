@@ -87,7 +87,6 @@ class LuantiServersTest extends TestCase
             'hetzner_error' => 'VM konnte nicht gestartet werden',
             'luanti_installation_error' => 'Engine nicht erreichbar',
             'bridge_error' => 'Bridge-Prüfung fehlgeschlagen',
-            'world_sync_error' => 'Weltvorlagen nicht erreichbar',
             'api_token' => 'private-api-token',
             'provisioning_private_key' => 'private-ssh-key',
             'bridge_configuration' => ['api_token' => 'private-bridge-token'],
@@ -99,8 +98,7 @@ class LuantiServersTest extends TestCase
             ->assertMountedActionModalSee('Server im Rechenzentrum')
             ->assertMountedActionModalSee('VM konnte nicht gestartet werden')
             ->assertMountedActionModalSee('Engine nicht erreichbar')
-            ->assertMountedActionModalSee('Bridge-Prüfung fehlgeschlagen')
-            ->assertMountedActionModalSee('Weltvorlagen nicht erreichbar');
+            ->assertMountedActionModalSee('Bridge-Prüfung fehlgeschlagen');
 
         $payload = json_encode([$page->snapshot, $page->effects], JSON_THROW_ON_ERROR);
         foreach (['private-api-token', 'private-ssh-key', 'private-bridge-token', $server->getRawOriginal('api_token')] as $secret) {

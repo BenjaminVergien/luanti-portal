@@ -34,53 +34,21 @@ class LuantiWorldTemplatesTest extends TestCase
         Filament::setTenant(null);
     }
 
-    public function test_admin_creates_lists_searches_and_retires_worlds_without_bridge_calls(): void
+    public function test_admin_lists_searches_and_retires_worlds_without_remote_sync_actions(): void
     {
         Http::preventStrayRequests();
         $this->panel(User::factory()->globalAdmin()->create());
-        $server = LuantiServer::factory()->create(['api_token' => 'private-token']);
-        $this->get('/admin/welten')->assertOk();
-        $page = Livewire::test(LuantiWorldTemplates::class)->callAction('create', [
-            'luanti_server_id' => $server->id, 'name' => ' Jugendwelt ', 'template_identifier' => ' youth ', 'is_selectable' => true,
-        ])->assertHasNoActionErrors()->assertNotified('Welt angelegt')->assertDontSee('private-token');
-        $world = LuantiWorldTemplate::query()->sole();
-        $this->assertSame('Jugendwelt', $world->name);
-        $this->assertSame('youth', $world->template_identifier);
-        $this->assertTrue($world->is_selectable);
+        $world = LuantiWorldTemplate::factory()->create(['name' => 'Jugendwelt']);
         $other = LuantiWorldTemplate::factory()->create(['name' => 'Andere Welt']);
+        $this->get('/admin/welten')->assertOk();
+        $page = Livewire::test(LuantiWorldTemplates::class)->assertActionExists('import')
+            ->assertActionDoesNotExist('syncWorlds')->assertActionDoesNotExist('create');
         $page->searchTable('Jugendwelt')->assertCanSeeTableRecords([$world])->assertCanNotSeeTableRecords([$other]);
         $page->callAction(TestAction::make('edit')->table($world), ['is_selectable' => false])
             ->assertHasNoActionErrors()->assertNotified('Gespeichert');
         $this->assertFalse($world->fresh()->is_selectable);
+        Livewire::test(LuantiServers::class)->assertActionDoesNotExist(TestAction::make('syncWorlds')->table($world->server));
         Http::assertNothingSent();
-    }
-
-    public function test_template_identifiers_are_unique_per_server_but_reusable_on_other_servers(): void
-    {
-        $admin = User::factory()->globalAdmin()->create();
-        $registry = app(LuantiWorldTemplateRegistry::class);
-        $world = LuantiWorldTemplate::factory()->create(['template_identifier' => 'dev']);
-        $data = $world->only(['luanti_server_id', 'name', 'template_identifier', 'is_selectable']);
-        $registry->create($admin, [...$data, 'luanti_server_id' => LuantiServer::factory()->create()->id]);
-        try {
-            $registry->create($admin, $data);
-            $this->fail('Expected duplicate validation failure.');
-        } catch (ValidationException $exception) {
-            $this->assertArrayHasKey('template_identifier', $exception->errors());
-        }
-        $this->assertDatabaseCount('luanti_world_templates', 2);
-    }
-
-    public function test_catalogue_rejects_invalid_names_identifiers_servers_and_flags(): void
-    {
-        $this->panel(User::factory()->globalAdmin()->create());
-        Livewire::test(LuantiWorldTemplates::class)->callAction('create')->assertHasActionErrors([
-            'name' => 'required', 'luanti_server_id' => 'required', 'template_identifier' => 'required',
-        ]);
-        $this->assertDatabaseCount('luanti_world_templates', 0);
-        $this->expectException(ValidationException::class);
-        app(LuantiWorldTemplateRegistry::class)->create(auth()->user(), ['luanti_server_id' => 999999,
-            'name' => ' ', 'template_identifier' => '', 'is_selectable' => 'invalid']);
     }
 
     public function test_caseworkers_and_members_cannot_access_or_modify_catalogue(): void
@@ -89,7 +57,7 @@ class LuantiWorldTemplatesTest extends TestCase
             $this->panel($actor);
             $this->get('/admin/welten')->assertForbidden();
             try {
-                app(LuantiWorldTemplateRegistry::class)->create($actor, []);
+                app(LuantiWorldTemplateRegistry::class)->query($actor);
                 $this->fail('Expected authorization failure.');
             } catch (AuthorizationException $exception) {
                 $this->assertDatabaseCount('luanti_world_templates', 0);

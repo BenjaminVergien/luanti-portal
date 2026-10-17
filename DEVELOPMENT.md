@@ -70,9 +70,14 @@ guards. The local runner starts the scheduler; deployments must invoke
 
 | Command | Schedule | Responsibility |
 | --- | --- | --- |
-| `luanti:worlds:sync` | Hourly | Fetch published templates from configured bridge APIs; optional `--server=ID` for manual targeting |
 | `luanti:accounts:recover` | Every minute | Redispatch account reconciliation after worker interruption |
 | `luanti:games:reconcile` | Every minute | Prepare/configure private copies and reconcile approved running periods |
+
+Published template ZIPs are imported through the admin template library or
+`luanti:templates:import path/to/template.zip --actor=ADMIN_ID`. The portal retains
+immutable bundles privately. New servers receive all library templates during
+bridge installation; retries use the same creation snapshot. There is no scheduled
+remote template discovery or on-demand commissioning.
 
 Account delivery runs on the queue and polls pending work. The bridge API also
 reconciles configured instance schedules approximately every ten seconds while
