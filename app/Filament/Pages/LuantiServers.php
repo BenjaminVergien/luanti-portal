@@ -13,12 +13,14 @@ use App\Services\PortalSettings;
 use App\Services\ProvisionedBridgeTransport;
 use Closure;
 use Filament\Actions\Action;
+use Filament\Actions\ActionGroup;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Actions;
+use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
@@ -81,116 +83,176 @@ class LuantiServers extends AccessTablePage
 
     public function table(Table $table): Table
     {
-        return $table->query(fn () => app(LuantiServerRegistry::class)->query($this->actor()))->poll('10s')->columns([
-            TextColumn::make('name')->label('Name')->searchable()->sortable(),
-            TextColumn::make('domain')->label('Domain')->placeholder('Noch nicht eingerichtet')->sortable(),
-            TextColumn::make('hetzner_status')->label('VM-Status')
-                ->getStateUsing(fn (LuantiServer $record): string => $record->hetznerStatusLabel()),
-            TextColumn::make('hetzner_server_id')->label('Hetzner-ID')->placeholder('–'),
-            TextColumn::make('hetzner_ipv4')->label('IPv4')->placeholder('–'),
-            TextColumn::make('hetzner_ipv6')->label('IPv6-Netz')->placeholder('–')->toggleable(isToggledHiddenByDefault: true),
-            TextColumn::make('hetzner_error')->label('VM-Fehler')->placeholder('–')->wrap(),
-            TextColumn::make('luanti_installation_status')->label('Luanti-Installation')
-                ->getStateUsing(fn (LuantiServer $record): string => $record->installationStatusLabel()),
-            TextColumn::make('luanti_docker_image')->label('Luanti-Image')->toggleable(isToggledHiddenByDefault: true),
-            TextColumn::make('bridge_status')->label('Bridge')->formatStateUsing(fn (?string $state): string => match ($state) {
-                'pending' => 'Wartet auf Luanti', 'installing' => 'Wird installiert', 'installed' => 'Installiert und geprüft',
-                'failed' => 'Installation nicht bestätigt', 'deleted' => 'VM gelöscht', default => 'Nicht eingerichtet',
-            })->placeholder('Nicht eingerichtet'),
-            TextColumn::make('bridge_commit')->label('Bridge-Commit')->limit(12)->tooltip(fn (LuantiServer $record): ?string => $record->bridge_commit)->toggleable(),
-            TextColumn::make('bridge_error')->label('Bridge-Installation')->wrap()->toggleable(),
-            TextColumn::make('luanti_engine_version')->label('Engine-Version')->placeholder('Noch nicht geprüft')->toggleable(),
-            TextColumn::make('luanti_verified_at')->label('Installation geprüft am')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->toggleable(isToggledHiddenByDefault: true),
-            TextColumn::make('luanti_installation_error')->label('Installation/Prüfung')->wrap()->toggleable(isToggledHiddenByDefault: true),
-            TextColumn::make('game_port')->label('Spiel-Port'),
-            TextColumn::make('api_base_url')->label('HTTPS-API-Verbindung')->placeholder('Nicht konfiguriert')->wrap()
-                ->formatStateUsing(fn (string $state, LuantiServer $record): string => $record->bridge_status === 'installed'
-                    && $state === ProvisionedBridgeTransport::origin($record) ? 'Privat über SSH' : $state),
-            IconColumn::make('has_api_token')->label('API-Token hinterlegt')
-                ->getStateUsing(fn (LuantiServer $record): bool => filled($record->getRawOriginal('api_token')))->boolean(),
-            TextColumn::make('worlds_synced_at')->label('Weltvorlagen synchronisiert')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('Noch nicht synchronisiert'),
-            TextColumn::make('world_sync_error')->label('Letzter Synchronisierungsfehler')->placeholder('–')->wrap(),
-        ])->recordActions([
-            Action::make('retryBridge')->label('Bridge-Installation erneut versuchen')
-                ->visible(fn (LuantiServer $record): bool => $record->bridge_configuration !== null
-                    && $record->bridge_status === 'failed' && $record->hetzner_status === 'running')
-                ->action(function (LuantiServer $record): void {
-                    app(BridgeProvisioning::class)->retry($this->actor(), $record);
-                    Notification::make()->title('Bridge-Installation erneut angefragt')->success()->send();
-                }),
-            Action::make('verifyInstallation')->label('Installation prüfen')
-                ->visible(fn (LuantiServer $record): bool => $record->luanti_docker_image !== null
-                    && $record->provisioning_host_public_key !== null
-                    && in_array($record->hetzner_status, ['running', 'initializing', 'starting'], true))
-                ->action(function (LuantiServer $record): void {
-                    try {
-                        $result = app(LuantiDockerInstallation::class)->verify($this->actor(), $record);
-                    } catch (ValidationException $exception) {
-                        Notification::make()->title('Installation konnte nicht geprüft werden')
-                            ->body(collect($exception->errors())->flatten()->first())->danger()->send();
+        return $table->query(fn () => app(LuantiServerRegistry::class)->query($this->actor()))->poll('10s')
+            ->stackedOnMobile()->recordAction('details')->columns([
+                TextColumn::make('name')->label('Name')->searchable()->sortable()->wrap()->weight('medium')
+                    ->description(fn (LuantiServer $record): ?string => filled($record->world_sync_error) ? 'Weltvorlagen: Fehler · siehe Details' : null),
+                TextColumn::make('domain')->label('Domain')->placeholder('Noch nicht eingerichtet')->sortable()->wrap(),
+                TextColumn::make('hetzner_status')->label('VM')->wrap()
+                    ->getStateUsing(fn (LuantiServer $record): string => $record->hetznerStatusLabel())
+                    ->color(fn (LuantiServer $record): string => filled($record->hetzner_error) || $record->hetzner_status === 'create_failed' ? 'danger' : 'gray')
+                    ->description(fn (LuantiServer $record): ?string => filled($record->hetzner_error) ? 'Fehler · siehe Details' : null),
+                TextColumn::make('hetzner_server_id')->label('Hetzner-ID')->placeholder('–')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('hetzner_ipv4')->label('IPv4')->placeholder('–')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('hetzner_ipv6')->label('IPv6-Netz')->placeholder('–')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('hetzner_error')->label('VM-Fehler')->placeholder('–')->wrap()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('luanti_installation_status')->label('Luanti')->wrap()
+                    ->getStateUsing(fn (LuantiServer $record): string => $record->installationStatusLabel())
+                    ->color(fn (LuantiServer $record): string => filled($record->luanti_installation_error) || $record->luanti_installation_status === 'failed' ? 'danger' : 'gray')
+                    ->description(fn (LuantiServer $record): ?string => filled($record->luanti_installation_error) ? 'Fehler · siehe Details' : null),
+                TextColumn::make('luanti_docker_image')->label('Luanti-Image')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('bridge_status')->label('Bridge')->wrap()
+                    ->getStateUsing(fn (LuantiServer $record): string => $this->bridgeStatusLabel($record->bridge_status))
+                    ->color(fn (LuantiServer $record): string => filled($record->bridge_error) || $record->bridge_status === 'failed' ? 'danger' : 'gray')
+                    ->description(fn (LuantiServer $record): ?string => filled($record->bridge_error) ? 'Fehler · siehe Details' : null),
+                TextColumn::make('bridge_commit')->label('Bridge-Commit')->limit(12)->tooltip(fn (LuantiServer $record): ?string => $record->bridge_commit)->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('bridge_error')->label('Bridge-Installation')->wrap()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('luanti_engine_version')->label('Engine-Version')->placeholder('Noch nicht geprüft')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('luanti_verified_at')->label('Installation geprüft am')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('luanti_installation_error')->label('Installation/Prüfung')->wrap()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('game_port')->label('Spiel-Port')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('api_base_url')->label('HTTPS-API-Verbindung')->placeholder('Nicht konfiguriert')->wrap()
+                    ->formatStateUsing(fn (string $state, LuantiServer $record): string => $record->bridge_status === 'installed'
+                        && $state === ProvisionedBridgeTransport::origin($record) ? 'Privat über SSH' : $state)->toggleable(isToggledHiddenByDefault: true),
+                IconColumn::make('has_api_token')->label('API-Token hinterlegt')
+                    ->getStateUsing(fn (LuantiServer $record): bool => filled($record->getRawOriginal('api_token')))->boolean()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('worlds_synced_at')->label('Weltvorlagen synchronisiert')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('Noch nicht synchronisiert')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('world_sync_error')->label('Letzter Synchronisierungsfehler')->placeholder('–')->wrap()->toggleable(isToggledHiddenByDefault: true),
+            ])->recordActions([ActionGroup::make([
+                Action::make('details')->label('Details')->icon('heroicon-o-information-circle')
+                    ->modalHeading(fn (LuantiServer $record): string => $record->name)
+                    ->modalWidth('3xl')->modalSubmitAction(false)->modalCancelActionLabel('Schließen')
+                    ->schema($this->serverDetails()),
+                Action::make('retryBridge')->label('Bridge-Installation erneut versuchen')
+                    ->visible(fn (LuantiServer $record): bool => $record->bridge_configuration !== null
+                        && $record->bridge_status === 'failed' && $record->hetzner_status === 'running')
+                    ->action(function (LuantiServer $record): void {
+                        app(BridgeProvisioning::class)->retry($this->actor(), $record);
+                        Notification::make()->title('Bridge-Installation erneut angefragt')->success()->send();
+                    }),
+                Action::make('verifyInstallation')->label('Installation prüfen')
+                    ->visible(fn (LuantiServer $record): bool => $record->luanti_docker_image !== null
+                        && $record->provisioning_host_public_key !== null
+                        && in_array($record->hetzner_status, ['running', 'initializing', 'starting'], true))
+                    ->action(function (LuantiServer $record): void {
+                        try {
+                            $result = app(LuantiDockerInstallation::class)->verify($this->actor(), $record);
+                        } catch (ValidationException $exception) {
+                            Notification::make()->title('Installation konnte nicht geprüft werden')
+                                ->body(collect($exception->errors())->flatten()->first())->danger()->send();
 
-                        return;
-                    }
-                    Notification::make()->title($result['title'])->body($result['body'])
-                        ->status($result['successful'] ? 'success' : 'warning')->send();
-                }),
-            Action::make('retryKeySetup')->label('VM-Einrichtung fortsetzen')
-                ->visible(fn (LuantiServer $record): bool => $record->hetzner_status === 'key_pending')
-                ->action(function (LuantiServer $record): void {
-                    $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->retryKeySetup($this->actor(), $record));
-                }),
-            Action::make('refreshVm')->label('VM-Status aktualisieren')
-                ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference !== null
-                    && ! in_array($record->hetzner_status, ['deleted', 'create_failed', 'key_pending'], true))
-                ->action(function (LuantiServer $record): void {
-                    $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->refresh($this->actor(), $record));
-                }),
-            Action::make('deleteVm')->label('Hetzner-VM löschen')->color('danger')->requiresConfirmation()
-                ->modalHeading('Hetzner-VM unwiderruflich löschen?')
-                ->modalDescription('Löscht die VM und ihre lokale Festplatte bei Hetzner. Alle Daten auf der VM gehen verloren. Der Portaleintrag bleibt zur Statusprüfung erhalten.')
-                ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference !== null
-                    && $record->hetzner_status !== 'deleted')
-                ->action(function (LuantiServer $record): void {
-                    $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->delete($this->actor(), $record));
-                }),
-            Action::make('syncWorlds')->label('Weltvorlagen synchronisieren')
-                ->action(function (LuantiServer $record): void {
-                    $this->notifyConnectionResult(app(LuantiWorldTemplateSynchronizer::class)->sync($this->actor(), $record));
-                }),
-            Action::make('checkConnection')->label('API-Verbindung prüfen')
-                ->action(function (LuantiServer $record): void {
-                    $this->notifyConnectionResult(app(LuantiApiConnectionChecker::class)->check($this->actor(), server: $record));
-                }),
-            Action::make('edit')->label('Bearbeiten')
-                ->fillForm(fn (LuantiServer $record): array => $record->only(['name', 'notes', 'domain', 'game_port', 'api_base_url']))
-                ->schema($this->serverFields())
-                ->action(function (LuantiServer $record, array $data): void {
-                    app(LuantiServerRegistry::class)->update($this->actor(), $record, $data);
-                    $this->saved();
-                }),
-            Action::make('removeToken')->label('API-Token entfernen')->color('danger')->requiresConfirmation()
-                ->modalHeading('API-Token entfernen?')->modalDescription('Der gespeicherte API-Token wird aus dem Portal entfernt.')
-                ->visible(fn (LuantiServer $record): bool => filled($record->getRawOriginal('api_token')))
-                ->action(function (LuantiServer $record): void {
-                    app(LuantiServerRegistry::class)->removeToken($this->actor(), $record);
-                    $this->saved('API-Token entfernt');
-                }),
-            Action::make('delete')->label('Löschen')->color('danger')->requiresConfirmation()
-                ->modalHeading('Server löschen?')->modalDescription('Der Servereintrag und seine gespeicherten Zugangsdaten werden aus dem Portal entfernt.')
-                ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference === null
-                    || (in_array($record->hetzner_status, ['deleted', 'create_failed'], true)
-                        && $record->getRawOriginal('provisioning_private_key') === null))
-                ->action(function (LuantiServer $record): void {
-                    try {
-                        app(LuantiServerRegistry::class)->delete($this->actor(), $record);
-                    } catch (ValidationException $exception) {
-                        Notification::make()->title('Server kann nicht gelöscht werden')->body($exception->errors()['server'][0])->danger()->send();
+                            return;
+                        }
+                        Notification::make()->title($result['title'])->body($result['body'])
+                            ->status($result['successful'] ? 'success' : 'warning')->send();
+                    }),
+                Action::make('retryKeySetup')->label('VM-Einrichtung fortsetzen')
+                    ->visible(fn (LuantiServer $record): bool => $record->hetzner_status === 'key_pending')
+                    ->action(function (LuantiServer $record): void {
+                        $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->retryKeySetup($this->actor(), $record));
+                    }),
+                Action::make('refreshVm')->label('VM-Status aktualisieren')
+                    ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference !== null
+                        && ! in_array($record->hetzner_status, ['deleted', 'create_failed', 'key_pending'], true))
+                    ->action(function (LuantiServer $record): void {
+                        $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->refresh($this->actor(), $record));
+                    }),
+                Action::make('deleteVm')->label('Hetzner-VM löschen')->color('danger')->requiresConfirmation()
+                    ->modalHeading('Hetzner-VM unwiderruflich löschen?')
+                    ->modalDescription('Löscht die VM und ihre lokale Festplatte bei Hetzner. Alle Daten auf der VM gehen verloren. Der Portaleintrag bleibt zur Statusprüfung erhalten.')
+                    ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference !== null
+                        && $record->hetzner_status !== 'deleted')
+                    ->action(function (LuantiServer $record): void {
+                        $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->delete($this->actor(), $record));
+                    }),
+                Action::make('syncWorlds')->label('Weltvorlagen synchronisieren')
+                    ->action(function (LuantiServer $record): void {
+                        $this->notifyConnectionResult(app(LuantiWorldTemplateSynchronizer::class)->sync($this->actor(), $record));
+                    }),
+                Action::make('checkConnection')->label('API-Verbindung prüfen')
+                    ->action(function (LuantiServer $record): void {
+                        $this->notifyConnectionResult(app(LuantiApiConnectionChecker::class)->check($this->actor(), server: $record));
+                    }),
+                Action::make('edit')->label('Bearbeiten')
+                    ->fillForm(fn (LuantiServer $record): array => $record->only(['name', 'notes', 'domain', 'game_port', 'api_base_url']))
+                    ->schema($this->serverFields())
+                    ->action(function (LuantiServer $record, array $data): void {
+                        app(LuantiServerRegistry::class)->update($this->actor(), $record, $data);
+                        $this->saved();
+                    }),
+                Action::make('removeToken')->label('API-Token entfernen')->color('danger')->requiresConfirmation()
+                    ->modalHeading('API-Token entfernen?')->modalDescription('Der gespeicherte API-Token wird aus dem Portal entfernt.')
+                    ->visible(fn (LuantiServer $record): bool => filled($record->getRawOriginal('api_token')))
+                    ->action(function (LuantiServer $record): void {
+                        app(LuantiServerRegistry::class)->removeToken($this->actor(), $record);
+                        $this->saved('API-Token entfernt');
+                    }),
+                Action::make('delete')->label('Löschen')->color('danger')->requiresConfirmation()
+                    ->modalHeading('Server löschen?')->modalDescription('Der Servereintrag und seine gespeicherten Zugangsdaten werden aus dem Portal entfernt.')
+                    ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference === null
+                        || (in_array($record->hetzner_status, ['deleted', 'create_failed'], true)
+                            && $record->getRawOriginal('provisioning_private_key') === null))
+                    ->action(function (LuantiServer $record): void {
+                        try {
+                            app(LuantiServerRegistry::class)->delete($this->actor(), $record);
+                        } catch (ValidationException $exception) {
+                            Notification::make()->title('Server kann nicht gelöscht werden')->body($exception->errors()['server'][0])->danger()->send();
 
-                        return;
-                    }
-                    $this->saved('Server gelöscht');
-                }),
-        ])->emptyStateHeading('Noch keine Luanti-Server');
+                            return;
+                        }
+                        $this->saved('Server gelöscht');
+                    }),
+            ])->label('Aktionen')->icon('heroicon-m-chevron-down')->button()->color('gray')])
+            ->emptyStateHeading('Noch keine Luanti-Server');
+    }
+
+    private function bridgeStatusLabel(?string $status): string
+    {
+        return match ($status) {
+            'pending' => 'Wartet auf Luanti', 'installing' => 'Wird installiert', 'installed' => 'Installiert und geprüft',
+            'failed' => 'Installation nicht bestätigt', 'deleted' => 'VM gelöscht', default => 'Nicht eingerichtet',
+        };
+    }
+
+    /** @return list<Section> */
+    private function serverDetails(): array
+    {
+        return [
+            Section::make('Server')->columns(2)->columnSpanFull()->schema([
+                TextEntry::make('domain')->label('Domain')->placeholder('Noch nicht eingerichtet'),
+                TextEntry::make('game_port')->label('Spiel-Port'),
+                TextEntry::make('notes')->label('Notizen')->placeholder('–')->columnSpanFull(),
+            ]),
+            Section::make('Virtuelle Maschine')->columns(2)->columnSpanFull()->schema([
+                TextEntry::make('hetzner_status')->label('VM-Status')->state(fn (LuantiServer $record): string => $record->hetznerStatusLabel()),
+                TextEntry::make('hetzner_server_id')->label('Hetzner-ID')->placeholder('–'),
+                TextEntry::make('hetzner_ipv4')->label('IPv4')->placeholder('–'),
+                TextEntry::make('hetzner_ipv6')->label('IPv6-Netz')->placeholder('–'),
+                TextEntry::make('hetzner_error')->label('VM-Fehler')->placeholder('–')->color('danger')->columnSpanFull(),
+            ]),
+            Section::make('Luanti-Installation')->columns(2)->columnSpanFull()->schema([
+                TextEntry::make('luanti_installation_status')->label('Status')->state(fn (LuantiServer $record): string => $record->installationStatusLabel()),
+                TextEntry::make('luanti_engine_version')->label('Engine-Version')->placeholder('Noch nicht geprüft'),
+                TextEntry::make('luanti_docker_image')->label('Luanti-Image')->placeholder('–')->columnSpanFull(),
+                TextEntry::make('luanti_verified_at')->label('Installation geprüft am')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('Noch nicht geprüft'),
+                TextEntry::make('luanti_installation_error')->label('Installation/Prüfung')->placeholder('–')->color('danger')->columnSpanFull(),
+            ]),
+            Section::make('Bridge')->columns(2)->columnSpanFull()->schema([
+                TextEntry::make('bridge_status')->label('Status')->state(fn (LuantiServer $record): string => $this->bridgeStatusLabel($record->bridge_status)),
+                TextEntry::make('bridge_installed_at')->label('Installiert am')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('–'),
+                TextEntry::make('bridge_commit')->label('Bridge-Commit')->placeholder('–')->columnSpanFull(),
+                TextEntry::make('bridge_error')->label('Bridge-Installation')->placeholder('–')->color('danger')->columnSpanFull(),
+            ]),
+            Section::make('API und Weltvorlagen')->columns(2)->columnSpanFull()->schema([
+                TextEntry::make('api_base_url')->label('HTTPS-API-Verbindung')->placeholder('Nicht konfiguriert')
+                    ->formatStateUsing(fn (string $state, LuantiServer $record): string => $record->bridge_status === 'installed'
+                        && $state === ProvisionedBridgeTransport::origin($record) ? 'Privat über SSH' : $state),
+                TextEntry::make('has_api_token')->label('API-Token hinterlegt')
+                    ->state(fn (LuantiServer $record): string => filled($record->getRawOriginal('api_token')) ? 'Ja' : 'Nein'),
+                TextEntry::make('worlds_synced_at')->label('Weltvorlagen synchronisiert')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('Noch nicht synchronisiert'),
+                TextEntry::make('world_sync_error')->label('Letzter Synchronisierungsfehler')->placeholder('–')->color('danger')->columnSpanFull(),
+            ]),
+        ];
     }
 
     /** @param Closure(): LuantiServer $operation */

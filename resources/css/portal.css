@@ -1,0 +1,41 @@
+@import '../../vendor/filament/filament/resources/css/theme.css';
+
+@source '../views/filament/**/*.blade.php';
+@source '../../app/Filament/**/*.php';
+
+.fi-main {
+    @apply lg:px-6;
+}
+
+.fi-sidebar-nav {
+    @apply px-4 py-5;
+}
+
+.fi-page-header-main-ctn {
+    @apply gap-y-5 py-5;
+}
+
+.fi-page-content {
+    @apply gap-y-5;
+}
+
+.fi-header-heading {
+    @apply sm:text-2xl;
+}
+
+.fi-ta-header-cell {
+    @apply py-2.5;
+}
+
+.fi-ta-text {
+    @apply sm:py-2.5;
+}
+
+.fi-ta-cell:has(.fi-ta-actions) {
+    @apply py-2.5;
+}
+
+.fi-ta-text.fi-wrapped,
+.fi-in-text-item {
+    overflow-wrap: anywhere;
+}

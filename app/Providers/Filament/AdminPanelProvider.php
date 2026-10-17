@@ -24,6 +24,7 @@ use Filament\Http\Middleware\DispatchServingFilamentEvent;
 use Filament\Panel;
 use Filament\PanelProvider;
 use Filament\Support\Colors\Color;
+use Filament\Support\Enums\Width;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
@@ -36,6 +37,9 @@ class AdminPanelProvider extends PanelProvider
     protected function configurePanel(Panel $panel): Panel
     {
         return $panel->login()->passwordReset()->brandName('Luanti-Portal')
+            ->viteTheme('resources/css/portal.css')
+            ->sidebarWidth('15rem')->sidebarFullyCollapsibleOnDesktop()
+            ->maxContentWidth(Width::Full)
             ->colors(['primary' => Color::Amber])
             ->userMenuItems([Action::make('access')->label('Meine Zugänge')->url(fn (): string => route('access'))])
             ->middleware([EncryptCookies::class, AddQueuedCookiesToResponse::class, StartSession::class,

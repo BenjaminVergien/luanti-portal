@@ -78,6 +78,37 @@ class LuantiServersTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_server_details_show_diagnostics_without_exposing_saved_credentials(): void
+    {
+        $this->adminPanel(User::factory()->globalAdmin()->create());
+        Http::preventStrayRequests();
+        $server = LuantiServer::factory()->create([
+            'notes' => 'Server im Rechenzentrum',
+            'hetzner_error' => 'VM konnte nicht gestartet werden',
+            'luanti_installation_error' => 'Engine nicht erreichbar',
+            'bridge_error' => 'Bridge-Prüfung fehlgeschlagen',
+            'world_sync_error' => 'Weltvorlagen nicht erreichbar',
+            'api_token' => 'private-api-token',
+            'provisioning_private_key' => 'private-ssh-key',
+            'bridge_configuration' => ['api_token' => 'private-bridge-token'],
+        ]);
+
+        $page = Livewire::test(LuantiServers::class)->assertSee('Fehler · siehe Details')
+            ->mountAction(TestAction::make('details')->table($server))
+            ->assertMountedActionModalSee($server->domain)
+            ->assertMountedActionModalSee('Server im Rechenzentrum')
+            ->assertMountedActionModalSee('VM konnte nicht gestartet werden')
+            ->assertMountedActionModalSee('Engine nicht erreichbar')
+            ->assertMountedActionModalSee('Bridge-Prüfung fehlgeschlagen')
+            ->assertMountedActionModalSee('Weltvorlagen nicht erreichbar');
+
+        $payload = json_encode([$page->snapshot, $page->effects], JSON_THROW_ON_ERROR);
+        foreach (['private-api-token', 'private-ssh-key', 'private-bridge-token', $server->getRawOriginal('api_token')] as $secret) {
+            $this->assertStringNotContainsString($secret, $payload);
+        }
+        Http::assertNothingSent();
+    }
+
     public function test_create_form_rejects_missing_required_fields_and_invalid_configuration(): void
     {
         $this->adminPanel(User::factory()->globalAdmin()->create());
