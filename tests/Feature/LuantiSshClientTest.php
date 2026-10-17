@@ -150,6 +150,59 @@ class LuantiSshClientTest extends TestCase
         $this->assertDirectoryDoesNotExist(dirname($keyFile));
     }
 
+    public function test_long_running_execution_bounds_output_and_removes_identity_files_on_overflow(): void
+    {
+        $server = $this->server();
+        $keyFile = null;
+        Process::preventStrayProcesses();
+        Process::fake(function (PendingProcess $process) use (&$keyFile) {
+            if (str_ends_with($process->command[0], 'whoami.exe')) {
+                return Process::result('test-user');
+            }
+            if (str_ends_with($process->command[0], 'icacls.exe')) {
+                return Process::result();
+            }
+            $keyFile = $process->command[array_search('-i', $process->command, true) + 1];
+            $this->assertSame(600, $process->timeout);
+
+            return Process::describe()->output(str_repeat('x', 2048));
+        });
+        try {
+            app(LuantiSshClient::class)->execute($server, 'bounded-test-script', 600, 1024);
+            $this->fail('Excess SSH output was accepted.');
+        } catch (\LengthException|ValidationException $exception) {
+            $this->assertStringNotContainsString(str_repeat('x', 20), $exception->getMessage());
+        }
+        $this->assertFileDoesNotExist($keyFile);
+        $this->assertDirectoryDoesNotExist(dirname($keyFile));
+    }
+
+    public function test_tunnel_forwards_only_loopback_and_preserves_the_pinned_host_identity(): void
+    {
+        $server = $this->server();
+        $keyFile = null;
+        Process::preventStrayProcesses();
+        Process::fake(function (PendingProcess $process) use (&$keyFile) {
+            if (str_ends_with($process->command[0], 'whoami.exe')) {
+                return Process::result('test-user');
+            }
+            if (str_ends_with($process->command[0], 'icacls.exe')) {
+                return Process::result();
+            }
+            $keyFile = $process->command[array_search('-i', $process->command, true) + 1];
+            $this->assertContains('-N', $process->command);
+            $this->assertContains('127.0.0.1:18443:127.0.0.1:8443', $process->command);
+            $this->assertContains('ExitOnForwardFailure=yes', $process->command);
+            $this->assertContains('StrictHostKeyChecking=yes', $process->command);
+            $this->assertContains('UpdateHostKeys=no', $process->command);
+
+            return Process::describe()->iterations(0);
+        });
+        app(LuantiSshClient::class)->tunnel($server);
+        $this->assertFileDoesNotExist($keyFile);
+        $this->assertDirectoryDoesNotExist(dirname($keyFile));
+    }
+
     public function test_native_openssh_accepts_generated_key_and_pinned_host_options_without_network_access(): void
     {
         $ssh = config('services.provisioning.ssh_binary');

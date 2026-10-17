@@ -11,6 +11,14 @@ return [
             ? (getenv('SystemRoot') ?: 'C:\\Windows').'\\System32\\OpenSSH\\ssh.exe' : '/usr/bin/ssh'),
     ],
 
+    'bridge_development' => [
+        'python_binary' => env('BRIDGE_DEV_PYTHON', PHP_OS_FAMILY === 'Windows' ? 'python' : 'python3'),
+        'source' => env('BRIDGE_DEV_SOURCE', dirname(base_path()).'/civicrm_bridge'),
+        'game_source' => env('BRIDGE_DEV_GAME_SOURCE'),
+        'origin' => 'https://localhost:18443',
+        'ca_certificate' => storage_path('app/private/bridge-development/ca.crt'),
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | Third Party Services

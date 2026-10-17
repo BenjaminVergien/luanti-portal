@@ -138,3 +138,21 @@ Keep `.env`, credentials, SQLite files, logs, runtime data, `vendor`,
 `node_modules`, published Filament assets and frontend builds out of Git. Commit
 lockfiles and the empty `.env.example`. The bridge, parent VS Code workspace and
 `.dev-tools` are separate from this repository.
+## Docker bridge development
+
+The sibling `civicrm_bridge` directory is the normal Git development checkout. Remote installations are deployed snapshots; keep the portal and bridge repositories separate. Commands through the existing runner:
+
+The archive hook can use a machine-local scanner without changing global PATH:
+`git config --local bridge.gitleaksPath C:/private/tools/gitleaks.exe` in the bridge checkout.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 bridge check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 bridge test --server=4 --game-source=C:\reviewed\minetest_game
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 bridge up --server=4 --game-source=C:\reviewed\minetest_game
+```
+
+Use a portal server record ID and explicitly supplied Minetest Game content. Set `BRIDGE_DEV_SOURCE`, `BRIDGE_DEV_GAME_SOURCE` or `BRIDGE_DEV_PYTHON` for local paths. Python 3 and Gitleaks are required; the runner adds this workspace's ignored private scanner directory to PATH. Portable tests and mandatory history/source scans run on Windows. Linux/ACL/API/systemd-regression and real engine checks run in isolated containers/directories on the selected Hetzner VM, using provider ownership checks, encrypted portal credentials and pinned SSH. The old development server is not a test target.
+
+`up` requires the exact tested snapshot/game/image. It deploys the bridge, stores the deployment token encrypted, retrieves the public test CA privately and keeps the foreground tunnel to `https://localhost:18443`. API and HTTPS proxy remain VM-loopback-only. The HTTP client trusts the test CA only for that exact origin in `APP_ENV=local`; TLS verification stays enabled. Ctrl+C closes the tunnel and removes temporary SSH files while remote saves/schedules remain.
+
+The optional live acceptance test uses an in-memory portal database and an explicitly published remote test template. After deployment, set `BRIDGE_DEV_LIVE_SERVER` to the portal record ID and run `vendor/bin/phpunit tests/Feature/BridgeDevelopmentLiveTest.php`. It reads existing encrypted VM credentials from the ignored local database without exporting keys, then verifies rejected token/certificate, template discovery, approval, a private instance, account synchronization and expiry/save retention. Normal test runs skip this external test.

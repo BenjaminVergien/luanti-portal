@@ -12,7 +12,21 @@ use Symfony\Component\Process\Exception\ExceptionInterface;
 
 class LuantiSshClient
 {
-    public function execute(#[SensitiveParameter] LuantiServer $server, string $script): string
+    public function execute(#[SensitiveParameter] LuantiServer $server, #[SensitiveParameter] string $script, int $timeoutSeconds = 25, int $maxOutputBytes = 16384): string
+    {
+        if ($timeoutSeconds < 1 || $timeoutSeconds > 1800 || $maxOutputBytes < 1 || $maxOutputBytes > 1048576) {
+            throw new \InvalidArgumentException('Invalid SSH execution limits.');
+        }
+
+        return $this->connection($server, $script, $timeoutSeconds, $maxOutputBytes);
+    }
+
+    public function tunnel(#[SensitiveParameter] LuantiServer $server, ?callable $connected = null): void
+    {
+        $this->connection($server, '', null, 16384, $connected);
+    }
+
+    private function connection(#[SensitiveParameter] LuantiServer $server, #[SensitiveParameter] string $script, ?int $timeoutSeconds, int $maxOutputBytes, ?callable $connected = null): string
     {
         if (! filter_var($server->hetzner_ipv4, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)
             || blank($server->getRawOriginal('provisioning_private_key'))
@@ -55,18 +69,91 @@ class LuantiSshClient
             chmod($keyFile, 0600);
             chmod($knownHosts, 0600);
             $stage = 'verification';
-            $result = Process::timeout(25)->input($script)->run([
+            $arguments = [
                 $binary, '-F', PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null', '-T', '-p', '22',
                 '-i', $keyFile, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none',
                 '-o', 'StrictHostKeyChecking=yes', '-o', 'HostKeyAlgorithms=rsa-sha2-512,rsa-sha2-256',
+                '-o', 'UpdateHostKeys=no',
                 '-o', 'UserKnownHostsFile='.$knownHostsOption, '-o', 'GlobalKnownHostsFile='.$knownHostsOption,
                 '-o', 'HostKeyAlias='.$hostAlias, '-o', 'ConnectTimeout=5', '-o', 'ConnectionAttempts=1',
                 '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', '-o', 'LogLevel=ERROR',
-                'root@'.$server->hetzner_ipv4, 'python3 -',
-            ]);
-            if (! $result->successful() || strlen($result->output()) > 16384) {
+            ];
+            if ($timeoutSeconds === null) {
+                $listener = @stream_socket_server('tcp://127.0.0.1:18443', $errorNumber, $errorMessage);
+                if ($listener === false) {
+                    throw new \RuntimeException('Port 18443 is already in use. Close the existing bridge tunnel before starting another.');
+                }
+                fclose($listener);
+                $arguments = [...$arguments, '-N', '-L', '127.0.0.1:18443:127.0.0.1:8443', '-o', 'ExitOnForwardFailure=yes', 'root@'.$server->hetzner_ipv4];
+                $captured = 0;
+                $running = Process::forever()->start($arguments, function (string $type, string $output) use (&$captured, $maxOutputBytes): void {
+                    $captured += strlen($output);
+                    if ($captured > $maxOutputBytes) {
+                        throw new \LengthException('SSH tunnel output exceeded its configured limit.');
+                    }
+                });
+                $stopping = false;
+                $handler = static function () use (&$stopping): bool {
+                    $stopping = true;
+
+                    return true;
+                };
+                if (function_exists('sapi_windows_set_ctrl_handler')) {
+                    sapi_windows_set_ctrl_handler($handler, true);
+                }
+                try {
+                    $deadline = microtime(true) + 10;
+                    $established = false;
+                    while ($running->running() && ! $stopping) {
+                        $running->ensureNotTimedOut();
+                        if (! $established) {
+                            $socket = @stream_socket_client('tcp://127.0.0.1:18443', $errorNumber, $errorMessage, 0.1);
+                            if ($socket !== false) {
+                                fclose($socket);
+                                $established = true;
+                                unlink($keyFile);
+                                unlink($knownHosts);
+                                rmdir($directory);
+                                if ($connected !== null) {
+                                    $connected();
+                                    $stopping = true;
+                                }
+                            } elseif (microtime(true) >= $deadline) {
+                                throw new \RuntimeException('The private SSH tunnel did not become ready.');
+                            }
+                        }
+                        usleep(100000);
+                    }
+                    if ($stopping) {
+                        $running->stop(2);
+                    }
+                    $result = $running->wait();
+                } finally {
+                    if ($running->running()) {
+                        $running->stop(2);
+                    }
+                    if (function_exists('sapi_windows_set_ctrl_handler')) {
+                        sapi_windows_set_ctrl_handler($handler, false);
+                    }
+                }
+                if ($stopping) {
+                    return '';
+                }
+            } else {
+                $captured = 0;
+                $result = Process::timeout($timeoutSeconds)->input($script)->run(
+                    [...$arguments, 'root@'.$server->hetzner_ipv4, 'python3 -'],
+                    function (string $type, string $output) use (&$captured, $maxOutputBytes): void {
+                        $captured += strlen($output);
+                        if ($captured > $maxOutputBytes) {
+                            throw new \LengthException('SSH output exceeded its configured limit.');
+                        }
+                    },
+                );
+            }
+            if (! $result->successful() || strlen($result->output()) > $maxOutputBytes) {
                 Log::warning('Luanti SSH verification failed', [
-                    'server_id' => $server->id, 'exit_code' => $result->exitCode(), 'reason' => substr($result->errorOutput(), 0, 1500),
+                    'server_id' => $server->id, 'exit_code' => $result->exitCode(),
                 ]);
                 $this->fail('Die SSH-Prüfung ist fehlgeschlagen. Die VM startet möglicherweise noch. Bitte später erneut prüfen; die gespeicherte Host-Identität bleibt verbindlich.');
             }
@@ -87,7 +174,9 @@ class LuantiSshClient
                     unlink($file);
                 }
             }
-            rmdir($directory);
+            if (is_dir($directory)) {
+                rmdir($directory);
+            }
         }
     }
 

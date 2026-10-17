@@ -33,6 +33,14 @@ class BridgeHttpClient
 
                     return $handler($request, $options);
                 });
+            $certificate = config('services.bridge_development.ca_certificate');
+            $parts = parse_url($url);
+            if (app()->environment('local') && config('services.bridge_development.origin') === 'https://localhost:18443'
+                && is_array($parts) && ($parts['scheme'] ?? null) === 'https' && ($parts['host'] ?? null) === 'localhost'
+                && ($parts['port'] ?? null) === 18443 && ! isset($parts['user']) && ! isset($parts['pass'])
+                && is_string($certificate) && is_file($certificate)) {
+                $client->withOptions(['verify' => $certificate, 'proxy' => '']);
+            }
             if ($body !== null) {
                 $client->withBody($body, 'application/json');
             }

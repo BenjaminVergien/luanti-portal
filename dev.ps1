@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('start', 'artisan', 'composer', 'build', 'test')]
+    [ValidateSet('start', 'artisan', 'composer', 'build', 'test', 'bridge')]
     [string]$Task = 'start',
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ToolArguments
@@ -20,7 +20,8 @@ if (-not (Test-Path -LiteralPath $composerExecutable)) {
 $previousPath = $env:PATH
 $previousComposerHome = $env:COMPOSER_HOME
 $previousComposerCache = $env:COMPOSER_CACHE_DIR
-$env:PATH = (Split-Path $phpExecutable -Parent) + ';' + $env:PATH
+$bridgeToolsDirectory = Join-Path $PSScriptRoot 'storage\app\private\bridge-development\tools'
+$env:PATH = (Split-Path $phpExecutable -Parent) + ';' + $bridgeToolsDirectory + ';' + $env:PATH
 $env:COMPOSER_HOME = Join-Path $toolsDirectory 'composer-home'
 $env:COMPOSER_CACHE_DIR = Join-Path $toolsDirectory 'composer-cache'
 
@@ -32,6 +33,7 @@ try {
         'composer' { & $phpExecutable $composerExecutable @ToolArguments }
         'build' { & npm.cmd run build }
         'test' { & $phpExecutable $composerExecutable run test }
+        'bridge' { & $phpExecutable artisan luanti:bridge:dev @ToolArguments }
     }
     $result = $LASTEXITCODE
 } finally {
