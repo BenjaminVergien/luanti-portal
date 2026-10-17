@@ -64,6 +64,9 @@ class LuantiServerRegistry
         DB::transaction(function () use ($actor, $server): void {
             $server = LuantiServer::query()->whereKey($server->id)->lockForUpdate()->firstOrFail();
             Gate::forUser($this->access->currentUser($actor))->authorize('delete', $server);
+            if ($server->dns_cleanup_pending) {
+                throw ValidationException::withMessages(['server' => 'Bitte zuerst die ausstehende DNS-Bereinigung abschließen.']);
+            }
             if ($server->hetzner_reference !== null && (! in_array($server->hetzner_status, ['deleted', 'create_failed'], true)
                 || $server->getRawOriginal('provisioning_private_key') !== null)) {
                 throw ValidationException::withMessages(['server' => 'Bitte zuerst die Hetzner-VM löschen und ihren Status aktualisieren.']);

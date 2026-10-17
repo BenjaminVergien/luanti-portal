@@ -25,6 +25,129 @@ def load(name):
 
 
 class LuantiProvisioningTest(unittest.TestCase):
+    def test_public_bridge_uses_real_hostname_without_development_proxy(self):
+        module = load('install_bridge')
+        payload = {'admin_name': 'Administrator', 'hostname': 'amber-otter.bensfoundry.de'}
+        settings = module.installation_settings(payload, {'image': IMAGE}, Path('/trusted/game'))
+        self.assertEqual('amber-otter.bensfoundry.de', settings['hostname'])
+        self.assertFalse(settings['development'])
+        del payload['hostname']
+        settings = module.installation_settings(payload, {'image': IMAGE}, Path('/trusted/game'))
+        self.assertEqual('localhost', settings['hostname'])
+        self.assertTrue(settings['development'])
+
+    def test_https_dns_gate_requires_only_the_expected_ipv4_and_no_ipv6(self):
+        module = load('install_https')
+        address = (2, 1, 6, '', ('192.0.2.42', 80))
+        ipv6 = (23, 1, 6, '', ('2001:db8::1', 80, 0, 0))
+        with patch.object(module.socket, 'getaddrinfo', side_effect=[[address], module.socket.gaierror()]):
+            self.assertTrue(module.dns_ready('host.example.test', '192.0.2.42'))
+        with patch.object(module.socket, 'getaddrinfo', side_effect=[[address], [ipv6]]):
+            self.assertFalse(module.dns_ready('host.example.test', '192.0.2.42'))
+        with patch.object(module.socket, 'getaddrinfo', side_effect=[[address], module.socket.gaierror()]):
+            self.assertFalse(module.dns_ready('host.example.test', '192.0.2.99'))
+        with patch.object(module.socket, 'getaddrinfo', side_effect=module.socket.gaierror()):
+            self.assertFalse(module.dns_ready('host.example.test', '192.0.2.42'))
+
+    def test_https_input_rejects_configuration_injection(self):
+        module = load('install_https')
+        payload = {'hostname': 'amber-otter.bensfoundry.de', 'reference': 'a' * 36,
+                   'ipv4': '192.0.2.42', 'email': 'admin@example.test'}
+        module.validate(payload)
+        for field, value in [('hostname', 'host.test;include /tmp/evil;'), ('email', 'a@example.test\n--debug'),
+                             ('ipv4', '192.0.2.42/24'), ('reference', '../outside')]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                module.validate(dict(payload, **{field: value}))
+
+    def test_nginx_only_proxies_api_over_tls_and_preserves_authentication(self):
+        module = load('install_https')
+        http = module.nginx_configuration('host.example.test', False).decode()
+        self.assertIn('listen 80;', http)
+        self.assertIn('/.well-known/acme-challenge/', http)
+        self.assertIn('root /var/www/luanti-portal-acme;', http)
+        self.assertNotIn('/var/lib/luanti-portal/', http)
+        self.assertIn('location / { return 404; }', http)
+        self.assertNotIn('proxy_pass', http)
+        config = module.nginx_configuration('host.example.test', True).decode()
+        self.assertIn('listen 443 ssl;', config)
+        self.assertIn('location /v1/', config)
+        self.assertIn('proxy_pass http://127.0.0.1:8765;', config)
+        self.assertIn('proxy_set_header Authorization $http_authorization;', config)
+        self.assertIn('proxy_set_header Content-Type $http_content_type;', config)
+        self.assertIn('client_max_body_size 256k;', config)
+        self.assertIn('access_log off;', config)
+        self.assertNotIn('access_log on', config)
+
+    def test_dns_propagation_wait_does_not_request_a_certificate_or_change_services(self):
+        module = load('install_https')
+        command = MagicMock()
+        with patch.object(module, 'dns_ready', return_value=False), patch.object(module, 'activate') as activate:
+            self.assertEqual({'status': 'dns_pending'}, module.provision({'hostname': 'host.example.test', 'ipv4': '192.0.2.42'}, command))
+        command.assert_not_called()
+        activate.assert_not_called()
+
+    def test_certificate_failure_remains_retryable_without_exposing_diagnostics(self):
+        module = load('install_https')
+        payload = {'hostname': 'host.example.test', 'ipv4': '192.0.2.42', 'email': 'admin@example.test'}
+        command = MagicMock(side_effect=subprocess.CalledProcessError(1, 'certbot', stderr='private-details'))
+        with patch.object(module, 'dns_ready', return_value=True), patch.object(module.Path, 'is_file', return_value=True), \
+                patch.object(module, 'trusted_directory'), patch.object(module, 'certificate_ready', return_value=False), \
+                patch.object(module, 'activate'), patch.object(module, 'write_owned') as write:
+            result = module.provision(payload, command)
+        self.assertEqual({'status': 'certificate_pending'}, result)
+        write.assert_not_called()
+        args = command.call_args.args
+        self.assertEqual('/usr/bin/certbot', args[0])
+        self.assertIn('--webroot', args)
+        self.assertEqual('/var/www/luanti-portal-acme', args[args.index('--webroot-path') + 1])
+        self.assertIn('--non-interactive', args)
+        self.assertNotIn('--force-renewal', args)
+
+    def test_valid_certificate_is_reused_and_renewal_reloads_validated_nginx(self):
+        module = load('install_https')
+        payload = {'hostname': 'host.example.test', 'ipv4': '192.0.2.42', 'email': 'admin@example.test', 'reference': 'a' * 36}
+        command = MagicMock()
+        with patch.object(module, 'dns_ready', return_value=True), patch.object(module.Path, 'is_file', return_value=True), \
+                patch.object(module, 'trusted_directory'), patch.object(module, 'certificate_ready', return_value=True), \
+                patch.object(module, 'activate') as activate, patch.object(module, 'write_owned') as write:
+            result = module.provision(payload, command)
+        self.assertEqual('ready', result['status'])
+        self.assertEqual('host.example.test', result['hostname'])
+        self.assertEqual(2, activate.call_count)
+        hook = write.call_args.args
+        self.assertIn('/renewal-hooks/deploy/', hook[0].as_posix())
+        self.assertIn(b'/usr/sbin/nginx -t\n/usr/bin/systemctl reload nginx.service', hook[1])
+        self.assertEqual(0o755, hook[2])
+        command.assert_called_once_with('/usr/bin/systemctl', 'enable', '--now', 'certbot.timer')
+
+    def test_first_certificate_is_issued_before_tls_virtual_host_activation(self):
+        module = load('install_https')
+        payload = {'hostname': 'host.example.test', 'ipv4': '192.0.2.42', 'email': 'admin@example.test', 'reference': 'a' * 36}
+        command = MagicMock()
+        with patch.object(module, 'dns_ready', return_value=True), patch.object(module.Path, 'is_file', return_value=True), \
+                patch.object(module, 'trusted_directory'), patch.object(module, 'certificate_ready', side_effect=[False, True]), \
+                patch.object(module, 'activate') as activate, patch.object(module, 'write_owned'):
+            result = module.provision(payload, command)
+        self.assertEqual('ready', result['status'])
+        self.assertNotIn(b'listen 443', activate.call_args_list[0].args[0])
+        self.assertIn(b'listen 443 ssl', activate.call_args_list[1].args[0])
+        self.assertEqual('/usr/bin/certbot', command.call_args_list[0].args[0])
+        self.assertIn('host.example.test', command.call_args_list[0].args)
+
+    def test_nginx_validation_failure_restores_existing_configuration_without_reload(self):
+        module = load('install_https')
+        path = MagicMock()
+        path.exists.return_value = True
+        path.is_symlink.return_value = False
+        previous = b'# Managed by luanti-portal;\nprevious configuration'
+        command = MagicMock(side_effect=subprocess.CalledProcessError(1, 'nginx -t'))
+        with patch.object(module, 'Path', return_value=path), patch.object(module, 'read_owned', return_value=previous), \
+                patch.object(module, 'write_owned') as write, self.assertRaises(subprocess.CalledProcessError):
+            module.activate(b'new configuration', command)
+        self.assertEqual(b'new configuration', write.call_args_list[0].args[1])
+        self.assertEqual(previous, write.call_args_list[1].args[1])
+        command.assert_called_once_with('/usr/sbin/nginx', '-t')
+
     def bridge_archive(self, names):
         stream = io.BytesIO()
         hashes = {name: hashlib.sha256(raw).hexdigest() for name, raw in names.items()}

@@ -7,11 +7,13 @@ use App\Models\LuantiServer;
 use App\Models\User;
 use App\Services\BridgeProvisioning;
 use App\Services\GithubBridgeSource;
+use App\Services\HetznerDns;
 use App\Services\HetznerVirtualMachines;
 use App\Services\LuantiDockerInstallation;
 use App\Services\LuantiImageCatalog;
 use App\Services\LuantiSshClient;
 use App\Services\PortalSettings;
+use App\Services\PublicHttpsProvisioning;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
@@ -144,5 +146,30 @@ class BridgeProvisioningTest extends TestCase
             $this->assertDatabaseCount('luanti_servers', 0);
             Http::assertNothingSent();
         }
+    }
+
+    public function test_public_installation_uses_production_hostname_and_keeps_api_unpublished_until_https_is_verified(): void
+    {
+        $actor = User::factory()->globalAdmin()->create();
+        $server = $this->server($actor);
+        $server->forceFill(['public_hostname' => 'amber-otter.bensfoundry.de',
+            'public_https_configuration' => ['zone_id' => 99, 'zone_name' => 'bensfoundry.de', 'label' => 'amber-otter', 'acme_email' => 'admin@example.test']])->save();
+        $this->mock(HetznerVirtualMachines::class)->shouldReceive('refresh')->once()->andReturn($server);
+        $this->mock(HetznerDns::class)->shouldReceive('ensureRecord')->once();
+        $this->mock(PublicHttpsProvisioning::class)->shouldNotReceive('configure');
+        $this->mock(LuantiSshClient::class)->shouldReceive('execute')->once()->withArgs(function (LuantiServer $vm, string $script): bool {
+            preg_match('/b64decode\("([A-Za-z0-9+\/=]+)"\)/', $script, $matches);
+            $payload = json_decode(base64_decode($matches[1]), true);
+            $this->assertSame('amber-otter.bensfoundry.de', $payload['hostname']);
+            $this->assertArrayNotHasKey('dns_api_token', $payload);
+
+            return true;
+        })->andReturn(json_encode(['ok' => true, 'commit' => $server->bridge_commit, 'source_sha256' => str_repeat('b', 64),
+            'image_id' => $server->luanti_image_id, 'token' => str_repeat('t', 43), 'ca_certificate' => null]));
+        $this->assertTrue(app(BridgeProvisioning::class)->process($server->id));
+        $this->assertSame(str_repeat('t', 43), $server->fresh()->api_token);
+        $this->assertNotNull($server->fresh()->bridge_installed_at);
+        $this->assertNull($server->fresh()->api_base_url);
+        $this->assertSame('installing', $server->fresh()->bridge_status);
     }
 }

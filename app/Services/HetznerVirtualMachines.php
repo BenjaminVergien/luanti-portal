@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Jobs\CleanupLuantiDns;
 use App\Jobs\ProvisionLuantiBridge;
 use App\Models\LuantiServer;
 use App\Models\User;
@@ -23,6 +24,22 @@ class HetznerVirtualMachines
 
     public function __construct(private PortalAccess $access, private HetznerCloudClient $http, private HetznerProvisioningKey $provisioningKey,
         private PortalSettings $settings, private LuantiDockerBootstrap $bootstrap) {}
+
+    public static function generatedName(): string
+    {
+        $adjectives = ['amber', 'bright', 'calm', 'clear', 'coral', 'crisp', 'dawn', 'deep', 'fair', 'fresh', 'gentle', 'golden',
+            'green', 'happy', 'hazy', 'keen', 'lively', 'lucky', 'mellow', 'misty', 'nimble', 'quiet', 'rapid', 'silver', 'soft', 'still', 'sunny', 'swift', 'vivid', 'warm'];
+        $nouns = ['badger', 'birch', 'brook', 'cedar', 'comet', 'crane', 'deer', 'dove', 'elm', 'falcon', 'fern', 'finch',
+            'fox', 'grove', 'heron', 'hill', 'lake', 'lark', 'lynx', 'maple', 'moss', 'otter', 'owl', 'pine', 'pond', 'reed', 'robin', 'spruce', 'vale', 'wren'];
+        for ($attempt = 0; $attempt < 100; $attempt++) {
+            $name = $adjectives[random_int(0, count($adjectives) - 1)].'-'.$nouns[random_int(0, count($nouns) - 1)];
+            if (! LuantiServer::query()->where('hetzner_name', $name)->exists()) {
+                return $name;
+            }
+        }
+
+        throw ValidationException::withMessages(['name' => 'Kein freier Vorschlag gefunden. Bitte einen VM-Namen eingeben.']);
+    }
 
     /** @return list<string|Unique> */
     public static function nameRules(): array
@@ -74,8 +91,13 @@ class HetznerVirtualMachines
             if (LuantiServer::query()->where('hetzner_name', $data['name'])->exists()) {
                 throw ValidationException::withMessages(['name' => 'Für diesen VM-Namen besteht bereits ein Eintrag. Bitte dessen Status aktualisieren.']);
             }
+            $https = app(HetznerDns::class)->prepare($data['name']);
             $server = new LuantiServer(['name' => $data['name'], 'game_port' => 30000]);
             $server->forceFill([
+                'public_hostname' => $https === null ? null : $https['label'].'.'.$https['zone_name'],
+                'domain' => $https === null ? null : $https['label'].'.'.$https['zone_name'],
+                'public_https_configuration' => $https, 'dns_status' => $https === null ? null : 'pending',
+                'https_status' => $https === null ? null : 'pending',
                 'hetzner_reference' => (string) Str::uuid(), 'hetzner_name' => $data['name'], 'hetzner_status' => 'key_pending',
                 'hetzner_create_payload' => $data,
                 'luanti_docker_image' => $luantiImage,
@@ -104,6 +126,12 @@ class HetznerVirtualMachines
 
     private function submitVm(User $actor, LuantiServer $server): LuantiServer
     {
+        if ($server->public_https_configuration !== null) {
+            $configuration = $server->public_https_configuration;
+            $dns = app(HetznerDns::class);
+            $zone = $dns->zone($configuration['zone_id'], $configuration['zone_name']);
+            $dns->assertAvailable($zone, $configuration['label']);
+        }
         try {
             $this->bootstrap->prepare($server);
             $sshKeyId = $this->provisioningKey->ensureRegistered($server);
@@ -282,6 +310,8 @@ class HetznerVirtualMachines
     {
         $this->provisioningKey->removeRegisteredKey($server);
         $server->forceFill([
+            'dns_cleanup_pending' => $server->public_https_configuration !== null && $server->dns_status !== 'deleted',
+            'https_status' => $server->public_https_configuration === null ? null : 'deleted',
             'hetzner_status' => 'deleted', 'hetzner_ipv4' => null, 'hetzner_ipv6' => null, 'hetzner_error' => null,
             'api_token' => null, 'api_base_url' => null,
             'provisioning_private_key' => null, 'provisioning_public_key' => null,
@@ -290,6 +320,9 @@ class HetznerVirtualMachines
             'luanti_installation_status' => $server->luanti_docker_image === null ? null : 'deleted', 'luanti_verified_at' => null,
             'bridge_status' => $server->bridge_status === null ? null : 'deleted', 'bridge_ca_certificate' => null,
         ])->save();
+        if ($server->dns_cleanup_pending) {
+            CleanupLuantiDns::dispatch($server->id)->afterCommit();
+        }
 
         return $server;
     }

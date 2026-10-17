@@ -60,6 +60,12 @@ def unpack(raw, digest, destination, source):
         return manifest
 
 
+def installation_settings(payload, metadata, game):
+    public = bool(payload.get('hostname'))
+    return {'image': metadata['image'], 'game_source': str(game), 'admin_name': payload['admin_name'],
+            'hostname': payload['hostname'] if public else 'localhost', 'development': not public}
+
+
 def main(payload):
     import fcntl
     os.umask(0o022)
@@ -74,6 +80,8 @@ def main(payload):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         active = base / 'active.json'
         identity = {key: payload[key] for key in ('commit', 'source_sha256', 'game_archive_sha256', 'image_id', 'admin_name')}
+        if payload.get('hostname'):
+            identity['hostname'] = payload['hostname']
         if active.exists() and json.loads(active.read_text()) != identity:
             raise ValueError('Existing bridge installation differs; automatic upgrades are not permitted')
         stage = base / ('install-' + uuid.uuid4().hex)
@@ -88,22 +96,34 @@ def main(payload):
                        check=True, stdout=log, stderr=log, timeout=300, env=dict(os.environ, DEBIAN_FRONTEND='noninteractive'))
         sys.path.insert(0, str(stage / 'source'))
         from lifecycle.install_docker import install
-        from tools.deploy_development import tls
         from api.security import read_regular, atomic_private
-        settings = {'image': metadata['image'], 'game_source': str(stage / 'game'),
-                    'admin_name': payload['admin_name'], 'hostname': 'localhost', 'development': True}
-        install(settings)
-        result = install(settings, apply=True)
+        public = bool(payload.get('hostname'))
+        settings = installation_settings(payload, metadata, stage / 'game')
+        if public and active.exists():
+            result = {'image_id': metadata['image_id']}
+        else:
+            install(settings)
+            result = install(settings, apply=True)
         if result['image_id'] != payload['image_id']:
             raise ValueError('Installed image differs from the verified image')
-        certificate = tls()
+        certificate = None
+        if not public:
+            from tools.deploy_development import tls
+            certificate = tls()
         token = read_regular(Path('/etc/civicrm-bridge-api/development.token'), 4096, {0}, forbidden=0o077).decode().strip()
         import ssl
         import urllib.error
         import urllib.request
-        context = ssl.create_default_context(cadata=certificate)
-        client = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
-        probe = urllib.request.Request('https://localhost:8443/v1/lifecycle/jobs/install-check-' + uuid.uuid4().hex,
+        handlers = [urllib.request.ProxyHandler({})]
+        if not public:
+            handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context(cadata=certificate)))
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+        handlers.append(NoRedirect())
+        client = urllib.request.build_opener(*handlers)
+        origin = 'http://127.0.0.1:8765' if public else 'https://localhost:8443'
+        probe = urllib.request.Request(origin + '/v1/lifecycle/jobs/install-check-' + uuid.uuid4().hex,
                                        headers={'Authorization': 'Bearer ' + token})
         ready = False
         import time

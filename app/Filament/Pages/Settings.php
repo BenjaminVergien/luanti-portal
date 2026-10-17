@@ -5,10 +5,13 @@ namespace App\Filament\Pages;
 use App\Models\User;
 use App\Services\GithubBridgeSource;
 use App\Services\HetznerCloudClient;
+use App\Services\HetznerDns;
 use App\Services\HetznerSettings as HetznerConfiguration;
 use App\Services\LuantiImageCatalog;
+use App\Services\LuantiServerRegistry;
 use App\Services\PortalAccess;
 use App\Services\PortalSettings;
+use App\Services\PublicEndpointPendingException;
 use Filament\Actions\Action;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\Select;
@@ -89,6 +92,18 @@ class Settings extends Page
                         ->helperText('Vorhandene, geprüfte Spieldateien mit game.conf. Die Dateien werden übertragen; Spiele und Weltvorlagen werden nicht automatisch heruntergeladen.'),
                     TextInput::make('bridge_admin_name')->label('Luanti-Administratorname')->required()->maxLength(20),
                 ]),
+            Section::make('Öffentliches HTTPS für neue VMs')
+                ->description('Eine eigene API-Adresse pro neuer VM. Bestehende Server behalten ihre Verbindung. DNS-Token im Hetzner-Projekt KonsoleH erstellen; er bleibt ausschließlich im Portal.')
+                ->schema([
+                    Toggle::make('public_https_enabled')->label('DNS und HTTPS für neue VMs automatisch einrichten'),
+                    TextInput::make('dns_zone')->label('DNS-Zone')->required()->maxLength(253)->rules(LuantiServerRegistry::domainRules()),
+                    TextEntry::make('dns_token_status')->label('DNS-Zugang')
+                        ->state(fn (): string => filled(app(PortalSettings::class)->dnsToken()) ? 'Token hinterlegt' : 'Noch kein DNS-Token hinterlegt'),
+                    TextInput::make('dns_api_token')->label('DNS-API-Token (Projekt KonsoleH)')->password()->autocomplete('off')->maxLength(256)
+                        ->helperText('Read-&-Write-Token. Wird verschlüsselt gespeichert und nie wieder angezeigt. Leer lassen, um den gespeicherten Token beizubehalten.'),
+                    TextInput::make('acme_email')->label('E-Mail für Zertifikate')->email()->maxLength(254)
+                        ->helperText('Kontaktadresse für Let’s Encrypt. Neue VMs benötigen die automatische Bridge-Installation sowie öffentlich erreichbare Ports 80 und 443.'),
+                ]),
         ]);
     }
 
@@ -109,6 +124,28 @@ class Settings extends Page
     protected function getHeaderActions(): array
     {
         return [
+            Action::make('checkDns')->label('Gespeicherten DNS-Zugang prüfen')
+                ->action(function (): void {
+                    $this->actor();
+                    abort_unless(static::canAccess(), 403);
+                    try {
+                        $zone = app(HetznerDns::class)->zone();
+                        Notification::make()->title('DNS-Zone erreichbar')->body($zone['name'].' ist als primäre Zone verfügbar. Für Änderungen ist ein Read-&-Write-Token nötig.')->success()->send();
+                    } catch (ValidationException|PublicEndpointPendingException $exception) {
+                        Notification::make()->title('DNS-Zugang nicht bestätigt')
+                            ->body($exception instanceof ValidationException ? collect($exception->errors())->flatten()->first() : $exception->getMessage())->danger()->send();
+                    }
+                }),
+            Action::make('removeDnsToken')->label('DNS-Token entfernen')->color('danger')->requiresConfirmation()
+                ->modalDescription('Deaktiviert HTTPS für neue VMs. Bestehende Zertifikate erneuern sich weiter; DNS-Einrichtung und Bereinigung benötigen wieder einen Token aus demselben Projekt.')
+                ->visible(fn (): bool => filled(app(PortalSettings::class)->dnsToken()))
+                ->action(function (): void {
+                    abort_unless(static::canAccess(), 403);
+                    app(PortalSettings::class)->removeDnsToken($this->actor());
+                    $this->data['dns_api_token'] = null;
+                    $this->data['public_https_enabled'] = false;
+                    Notification::make()->title('DNS-Token entfernt')->success()->send();
+                }),
             Action::make('checkBridgeSource')->label('Gespeicherten GitHub-Zugang prüfen')
                 ->action(function (): void {
                     abort_unless(static::canAccess(), 403);
@@ -178,7 +215,8 @@ class Settings extends Page
 
     private function fillSettings(): void
     {
-        $this->form->fill(['luanti_docker_image' => app(PortalSettings::class)->luantiDockerImage(), ...app(PortalSettings::class)->bridge()]);
+        $this->form->fill(['luanti_docker_image' => app(PortalSettings::class)->luantiDockerImage(),
+            ...app(PortalSettings::class)->bridge(), ...app(PortalSettings::class)->publicHttps()]);
     }
 
     /** @return array<string, string> */
