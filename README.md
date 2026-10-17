@@ -1,92 +1,129 @@
 # Luanti Portal
 
-Lokale Entwicklungsbasis fuer ein Fachkraefteportal mit Laravel 13 und
-Filament 5. Das Portal soll die Verwaltung von Einrichtungen, Freigaben und
-Luanti-Zugaengen ermoeglichen. Registrierung, E-Mail-Bestaetigung, Einrichtungen,
-Mitgliedschaften, Beitrittsantraege und persoenliche Einladungen sind umgesetzt.
-Serververwaltung, Weltantraege und die Verbindung zur eigenstaendigen
-Luanti-Bridge folgen noch.
+A staff portal built with Laravel 13 and Filament 5. It manages organizations,
+world requests and private Luanti games through the separate `civicrm_bridge`
+project. The application UI is German; this documentation is English.
 
-## Bestehende lokale Einrichtung
+Status reflects source and tests as of 2026-10-17, not verification of a live
+deployment. **Implemented** means present in code; **Provisional** marks moving
+parts or environment-specific assumptions; **Planned** identifies explicit future
+work. Other missing capabilities are listed as known limitations.
 
-Die portable Windows-Toolchain und die Befehle fuer diesen Workspace stehen in
-[DEVELOPMENT.md](DEVELOPMENT.md). Das Panel ist unter
-http://127.0.0.1:8000/admin erreichbar.
+## Current behavior
 
-## Einrichtung nach einem Clone
+**Implemented:**
 
-Voraussetzung sind PHP und Composer sowie Node.js und npm. Die konkreten
-Paketversionen sind in `composer.lock` und `package-lock.json` festgeschrieben;
-`composer check-platform-reqs` prueft PHP und die benoetigten Erweiterungen.
-Die bestehende Windows-Einrichtung verwendet PHP 8.5.
+- Registration, email verification, organization creation/memberships, join requests,
+  personal invitations, account administration and organization verification
+  with verification time and actor.
+- Global-admin server management: game hostname/port, encrypted bridge token,
+  HTTPS connection check and published-template synchronization. Failed catalogue
+  fetches retain the previous list; missing templates become unavailable.
+- Organization world requests, internal approval/rejection and non-overlapping
+  reservations per server. Approved requests receive a private game instance
+  copied from a published template revision, with separate accounts and saves.
+- Game accounts separate from portal users, with participant/facilitator roles,
+  encrypted stored initial passwords, asynchronous delivery and time-bound
+  admission. Applicants and organization managers can manage eligible requests'
+  accounts alongside internal staff.
+- Hetzner VM creation, status recovery and deletion with ownership checks and
+  per-VM SSH keys. An optional selected official Luanti image is installed on a
+  fresh Ubuntu 24.04 VM and verified over SSH against a stored host identity.
 
-Mit einer bereits installierten Toolchain in PowerShell:
+**Provisional / moving parts:** UI organization, template publication and operator
+upgrades, the local development reset, and Hetzner bootstrap. Image verification
+checks Docker, the installed image ID and engine version; it does not deploy the
+bridge, install game content, create a playable world, or configure DNS/TLS and
+public endpoints. The bridge's Linux/systemd recipe is a separate deployment.
 
-```powershell
-git clone https://github.com/Stewie23/luanti-portal.git
-Set-Location luanti-portal
-Copy-Item .env.example .env
-composer install
-composer check-platform-reqs
-npm ci --ignore-scripts
-php artisan key:generate
-New-Item -ItemType File -Path database/database.sqlite
-php artisan migrate
-```
+**Planned:** the bridge repository describes a future CiviCRM integration.
+Contact mapping and participation/admission policy remain open; no CiviCRM
+extension is implemented. This is not a committed portal delivery schedule.
 
-In der lokalen `.env` ein eigenes `DEV_ADMIN_PASSWORD` mit mindestens
-16 Zeichen eintragen. Danach den lokalen Entwicklungsaccount anlegen und
-die Entwicklungsprozesse starten:
+## Components and game lifecycle
 
-```powershell
-php artisan db:seed
-composer run dev
-```
+| Component | Responsibility |
+| --- | --- |
+| Portal | Portal identities/permissions, organizations, approvals, server reservations, game-account roster and orchestration |
+| Bridge HTTPS API | Bearer authentication, durable job acceptance, delivery, polling and recovery |
+| Bridge controller | Reviewed template publication, private copies, approved schedules and service transitions |
+| Luanti mod | World-local authentication, role privileges, admission windows and account receipts |
 
-Der Account verwendet standardmaessig `dev@example.test`. Der Seeder legt ihn
-nur in `APP_ENV=local` an und behaelt das Passwort eines bestehenden Accounts.
-Der Entwicklungsaccount erhaelt explizit die Globaladminrolle.
+Approval records an access window and selects a template revision. The scheduler
+prepares/configures the private copy and starts it during that window; the queue
+delivers account jobs. Dates are inclusive calendar dates in `Europe/Berlin`,
+converted to UTC Unix seconds with an exclusive end at midnight after the last
+day. Both the bridge schedule and the mod's account windows enforce access.
 
-## Zugangsverwaltung
+Date edits require reapproval while the previous approved window remains in
+effect. Extending a booking reuses its save. A confirmed template change on the
+approved server prepares a fresh copy, archives the old copy and recreates the
+roster using stored initial passwords. Passwords changed inside the old game
+are not transferred. Expiry stops a game and retains its save; archival prevents
+reactivation and also retains the save.
 
-- `/admin`: interne Verwaltung fuer Globaladmins und Sachbearbeitung.
-- `/portal/register`: Selbstregistrierung als Fachkraft ohne Mitgliedschaften.
-- `/zugang`: eigene Mitgliedschaften, Einrichtungssuche, Beitrittsantraege und
-  Annahme persoenlicher Einladungen; erfordert eine bestaetigte E-Mail-Adresse.
-- `/portal`: Einrichtungsbereich mit Wechsel zwischen eigenen Einrichtungen.
+The portal uses `/v1/world-templates` and account/lifecycle job endpoints. HTTP
+envelopes remain v1 while portal account and instance payloads/results use v2.
+See the bridge's [integration contract](../civicrm_bridge/docs/INTEGRATION.md)
+and [HTTPS API/deployment guide](../civicrm_bridge/docs/HTTPS_API.md). These sibling
+links assume the shared workspace layout; the bridge is a separate project.
 
-Globaladmins legen Einrichtungen an, sperren Konten und laden zu internen
-Rollen ein. Sachbearbeitung verwaltet Mitgliedschaften aller Einrichtungen.
-Einrichtungsverwaltungen bearbeiten den Einrichtungsnamen, entscheiden ueber
-Beitrittsantraege und verwalten Fachkraftmitgliedschaften ihrer Einrichtung.
-Verwaltungsmitgliedschaften vergeben nur die internen Rollen.
+## Access boundaries
 
-Einladungen sind sieben Tage gueltig, einmal verwendbar und an die bestaetigte
-E-Mail-Adresse gebunden. Beim Annehmen werden die aktuellen Rechte der
-einladenden Person erneut geprueft. Mitgliedschaften gelten je Einrichtung.
-Das Entfernen einer Mitgliedschaft veraendert andere Einrichtungen nicht.
+- `/admin`: internal administration for global admins and caseworkers.
+- `/portal/register`: staff self-registration, initially without memberships.
+- `/zugang`: memberships, organization search, join requests and invitation
+  acceptance; requires verified email.
+- `/portal`: organization area with organization switching.
 
-Den ersten produktiven Globaladmin richtet `php artisan admin:create`
-interaktiv ein. Der Befehl nimmt keine Passwortargumente entgegen und ersetzt
-kein bestehendes Passwort. Sobald ein aktiver Globaladmin existiert, werden
-weitere interne Rollen ausschliesslich per Einladung vergeben.
+Global admins manage servers/settings, create organizations, block portal
+accounts and invite internal roles. Internal staff manage memberships and decide
+world requests. Organization managers manage their organization's name, join
+requests and staff memberships; only internal staff grant additional manager
+memberships. Verified active users may also create their own organization and
+receive its manager membership. Memberships are scoped to each organization;
+internal staff record organization verification separately from email verification.
 
-Lokal schreibt der Mailer Einladungen ins Log. E-Mail-Bestaetigungen laufen
-ueber die Queue; `composer run dev` startet den Worker mit. Vor externer Nutzung
-einen echten Mailtransport und einen dauerhaft laufenden Queue-Worker
-konfigurieren.
+Invitations last seven days, are single-use and bind to the verified email
+address. Acceptance rechecks the inviter's current permissions. The first
+production global admin is created interactively with `php artisan admin:create`;
+the command takes no password argument, preserves existing passwords and refuses
+bootstrap once an active global admin exists. Further internal roles use invitations.
 
-## Pruefen und bauen
+## Development and deployment
 
-```powershell
-composer run test
-npm run build
-```
+See [DEVELOPMENT.md](DEVELOPMENT.md) for fresh-clone setup, portable Windows
+commands, local defaults and the development-only template migration reset.
+The installed package versions are pinned in the lockfiles; the current local
+toolchain uses PHP 8.5.
 
-## Repository-Inhalt
+Deployment requires HTTPS, a canonical `APP_URL`, a stable `APP_KEY`, a real mail
+transport, a durable queue worker and `schedule:run` every minute. Portal-generated
+links use the configured application origin. Retain database/queue state and a
+shared lock-capable cache across workers. Back up the database and application
+key privately: bridge tokens, initial passwords, provisioning keys and bootstrap
+data depend on that key. Bridge world, registry and receipt backups are separate
+from source control. See the bridge guide for service identities and permissions.
 
-Versioniert werden Anwendungscode, Projektkonfiguration, Tests, Dokumentation,
-Lockdateien und die leere Konfigurationsvorlage `.env.example`.
-Abhaengigkeiten in `vendor` und `node_modules`, Build-Ausgaben, echte `.env`-
-Dateien, Datenbanken und Laufzeitdaten bleiben lokal. Die portable Toolchain,
-der VS-Code-Workspace und die Bridge liegen ausserhalb dieses Repositories.
+## Known limitations
+
+- One game runs per configured bridge service/port; overlapping approvals on the
+  same server are rejected. Participant count is request metadata, not an enforced
+  account quota.
+- Approval and job acceptance do not imply a running game or successful import.
+  Partial account batches and unknown outcomes require inspection; retries reuse
+  saved IDs/bytes. Unknown outcomes can block subsequent grants.
+- The portal limits bridge responses to 256 KiB, validates HTTPS and does not
+  follow redirects. API reachability/token checks do not prove game readiness.
+- The bridge offers no password-reset, account-deletion/rename, roster-query or
+  save-deletion API. Stored initial passwords are not current game passwords.
+  Archived saves and completed receipt history have no automatic expiry policy.
+- Hetzner VM deletion is blocked while portal template or game-instance records
+  reference the server; a running VM or verified engine is not a playable game.
+- Existing shared-world records have no automatic production conversion to
+  templates/private games. The development reset is destructive and local-only.
+
+Version application code, configuration templates, tests, documentation and
+lockfiles. Keep credentials, databases, runtime data, dependencies and build
+outputs out of Git. The bridge, workspace configuration and portable toolchain
+are outside this repository.

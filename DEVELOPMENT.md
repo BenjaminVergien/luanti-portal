@@ -1,106 +1,140 @@
-# Lokale Entwicklung
+# Local development
 
-Das Fachkraefteportal verwendet Laravel 13 und Filament 5. PHP und Composer
-liegen portabel im benachbarten Workspace-Ordner `.dev-tools`; Node und npm
-sind bereits auf dem Rechner installiert. Der globale PATH wird nicht geaendert.
-Die aufgeloesten Anwendungsversionen stehen in `composer.lock` und `package-lock.json`.
+The portal uses Laravel 13 and Filament 5 with PHP 8.5 in this workspace. Exact
+dependency versions are pinned in `composer.lock` and `package-lock.json`.
+**Implemented** behavior and component boundaries are summarized in the
+[README](README.md); local paths and deployment recipes below are **Provisional**
+environment assumptions. Documentation does not certify a live deployment.
 
-## Starten
+## Existing Windows workspace
 
-Im Projektordner:
+PHP and Composer are portable tools in the sibling `.dev-tools` directory; Node
+and npm are installed on the host. `dev.ps1` temporarily adjusts the process PATH
+and Composer directories without changing the global PATH.
+
+From the project directory:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1
 ```
 
-Der Befehl startet den lokalen Webserver, den Queue-Worker, den Scheduler und Vite zusammen.
-Mit `Strg+C` werden die Entwicklungsprozesse beendet.
+This starts the local webserver, queue worker, scheduler and Vite. Stop them with
+Ctrl+C. Internal administration is at http://127.0.0.1:8000/admin; the organization
+area is `/portal`, registration `/portal/register`, and personal access `/zugang`.
+The local global-admin account defaults to `dev@example.test`; its password is
+stored only in the ignored `.env` as `DEV_ADMIN_PASSWORD`.
 
-- Portal: http://127.0.0.1:8000/admin
-- Lokaler Entwicklungszugang: `dev@example.test`
-- Das generierte Passwort steht ausschliesslich in der ignorierten `.env`
-  unter `DEV_ADMIN_PASSWORD`.
+## Fresh clone with an installed toolchain
 
-Die interne Verwaltung steht unter `/admin`, der Einrichtungsbereich unter
-`/portal`. Fachkraefte registrieren sich unter `/portal/register`; ihre
-Zugangsseite ist `/zugang`. Der lokale Entwicklungsaccount ist Globaladmin.
-Einrichtungen, Mitgliedschaften, Beitrittsantraege und persoenliche Einladungen
-sind eingerichtet. Weltantraege waehlen veroeffentlichte Weltvorlagen; genehmigte
-Antraege erhalten private Spielkopien. Der Scheduler bereitet Kopien vor und
-gleicht ihre genehmigten Laufzeiten mit der Bridge ab.
-
-Die neue Vorlagen-/Instanzstruktur benoetigt bei bestehenden Entwicklungsdaten
-ein bewusstes Zuruecksetzen der bisherigen Weltantraege und Accountzuordnungen.
-Zuerst die lokale SQLite-Datei sichern, dann `luanti:worlds:reset-development
---force` und `migrate` ueber `dev.ps1 artisan` ausfuehren. Benutzer, Einrichtungen
-und Serverkonfiguration bleiben erhalten. Server-Spielstaende werden nicht
-geloescht oder automatisch zu Vorlagen gemacht.
-
-Die Bridge benoetigt ihren aktualisierten installierten Controller und die
-aktualisierte HTTPS-API. Veroeffentlichung sauberer Vorlagen und Operator-Upgrade
-stehen in der benachbarten Bridge unter `docs/HTTPS_API.md`. Produktiv muss
-Laravel `schedule:run` einmal pro Minute ausgefuehrt werden; lokal uebernimmt
-der mit `dev.ps1` gestartete Scheduler diese Aufgabe.
-
-## Befehle
+Requires PHP/Composer and Node/npm. Check PHP extensions against the installed
+packages; do not infer runtime requirements from the local PHP version alone.
 
 ```powershell
-# Tests
-powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 test
-
-# Frontend bauen
-powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 build
-
-# Artisan und Composer verwenden
-powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan migrate
-powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 composer check-platform-reqs
-
-# Ersten Globaladmin ausserhalb der lokalen Entwicklung interaktiv anlegen
-powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan admin:create
-
-# Lokalen Entwicklungsaccount nach einem Datenbank-Neustart wieder anlegen
-powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan db:seed
+git clone https://github.com/Stewie23/luanti-portal.git
+Set-Location luanti-portal
+Copy-Item .env.example .env
+composer install
+composer check-platform-reqs
+npm ci --ignore-scripts
+php artisan key:generate --no-interaction
+New-Item -ItemType File -Path database/database.sqlite
+php artisan migrate --no-interaction
 ```
 
-Der Seeder erzeugt den Entwicklungsaccount nur in `APP_ENV=local`, weist ihm
-die Globaladminrolle zu und ueberschreibt kein bestehendes Passwort.
-`.env.example` enthaelt kein Passwort.
+Set a private `DEV_ADMIN_PASSWORD` of at least 16 characters in `.env`, then run
+`php artisan db:seed --no-interaction` and `composer run dev`. The development
+seeder runs only in `APP_ENV=local`, grants the global-admin role and preserves an
+existing account's password. `.env.example` contains no password.
 
-Einladungen und E-Mail-Bestaetigungen gehen lokal an den Log-Mailer; die
-Bestaetigungen werden vom Queue-Worker verarbeitet. Einladungslinks im Log
-sind persoenliche Testzugangslinks. Einladungen laufen nach sieben Tagen ab.
+## Commands and background work
 
-## Lokale Konfiguration
+```powershell
+# Tests and frontend build
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 test
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 build
 
-- SQLite: `database/database.sqlite`
-- Queue, Sessions und Cache: Datenbank
-- Oberflaeche: Deutsch; Zeitzone: Europe/Berlin
-- Mail: lokales Log, kein Mailversand
-- Webserver und Vite: an `127.0.0.1` gebunden
+# Artisan and Composer through the portable toolchain
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan migrate --no-interaction
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 composer check-platform-reqs
 
-`.env`, SQLite-Dateien, lokale Logs, Zugangsdaten, `vendor`, `node_modules`
-und Build-Ausgaben gehoeren nicht ins Repository. Die Lockdateien gehoeren
-zum Quellcode. Die vorhandene SSH-Bridge ist ein eigenstaendiges Projekt.
+# First production global admin (interactive password prompt)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan admin:create
 
-Vor einem Deployment einen echten Mailtransport, HTTPS, einen stabilen
-Anwendungsschluessel und einen dauerhaft laufenden Queue-Worker konfigurieren.
-Der erste produktive Globaladmin wird ueber `admin:create` angelegt. Die
-Zugriffsregeln gelten in allen Umgebungen, auch lokal; es gibt keinen
-allgemeinen lokalen Adminzugriff mehr.
+# Restore the local development account after a database reset
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan db:seed --no-interaction
+```
 
-## Eigenes Git-Repository
+The following schedules are implemented in `routes/console.php`, with overlap
+guards. The local runner starts the scheduler; deployments must invoke
+`php artisan schedule:run --no-interaction` every minute.
 
-`luanti-portal` ist ein eigenstaendiges Repository auf dem Branch `main`.
-Die Bridge, der uebergeordnete VS-Code-Workspace und `.dev-tools` liegen
-ausserhalb dieses Repositories.
+| Command | Schedule | Responsibility |
+| --- | --- | --- |
+| `luanti:worlds:sync` | Hourly | Fetch published templates from configured bridge APIs; optional `--server=ID` for manual targeting |
+| `luanti:accounts:recover` | Every minute | Redispatch account reconciliation after worker interruption |
+| `luanti:games:reconcile` | Every minute | Prepare/configure private copies and reconcile approved running periods |
 
-Versioniert werden die Laravel-Projektdateien, unser Anwendungscode,
-Tests, Dokumentation, `.env.example`, `composer.json`, `composer.lock`,
-`package.json` und `package-lock.json`. Laravel, Filament und die anderen
-heruntergeladenen Pakete in `vendor` und `node_modules` werden ignoriert.
-Sie lassen sich aus den Lockdateien mit `composer install` und
-`npm ci --ignore-scripts` wiederherstellen.
+Account delivery runs on the queue and polls pending work. The bridge API also
+reconciles configured instance schedules approximately every ten seconds while
+running. Persisted jobs retain their exact retry bytes and IDs; unknown outcomes
+need inspection rather than deletion/recreation of state.
 
-Auch die veroeffentlichten Filament-Dateien, Frontend-Builds, `.env`-Varianten,
-SQLite-Datenbanken und der Laufzeitinhalt von `storage` bleiben lokal.
-Die leeren Verzeichnisse werden ueber ihre `.gitignore`-Dateien erhalten.
+## Template migration: development reset only
+
+**Provisional / moving part:** the template/private-instance migration refuses to
+run when legacy worlds or world requests exist. Existing saves are not implicitly
+safe templates, and there is no automatic production data conversion.
+
+For disposable local development data, first stop local workers/scheduler and
+back up the SQLite database. With `APP_ENV=local`, explicitly discard the old
+portal world data before migrating:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan luanti:worlds:reset-development --force --no-interaction
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 artisan migrate --no-interaction
+```
+
+The reset removes world/template records, requests, private-instance records,
+game accounts, assignments, account/lifecycle jobs and queued/failed
+`ProcessLuantiAccounts` entries. It preserves users, organizations and server
+configuration. It does not stop remote games, delete server saves, or publish
+templates. The command refuses non-local environments or a missing `--force`.
+Restart development processes after the reset/migration is complete.
+
+The bridge needs its reviewed controller and HTTPS API snapshots upgraded, then
+clean templates published and synchronized into the portal. See the bridge's
+[publication and upgrade procedure](../civicrm_bridge/docs/HTTPS_API.md).
+Sibling links assume both projects are checked out beside each other.
+
+## Local defaults and deployment assumptions
+
+| Setting | Local default |
+| --- | --- |
+| Database | SQLite at `database/database.sqlite` |
+| Queue, sessions, cache | Database |
+| UI / timezone | German / `Europe/Berlin` |
+| Mail | Log mailer; no external delivery |
+| Webserver and Vite | Bound to `127.0.0.1` |
+
+Invitation links in logs are private access links and expire after seven days.
+Email verification uses the queue. Authorization applies locally too; there is
+no unrestricted local-admin bypass.
+
+For deployment, configure HTTPS, the canonical `APP_URL`, a real mail transport,
+a durable queue worker, the minute scheduler, persistent database/queue state and
+a cache that supports shared locks. Keep `APP_KEY` stable and back it up privately
+with the database; replacing it breaks access to encrypted credentials and job
+payloads. Back up bridge saves, registry and receipts separately.
+
+Optional Hetzner provisioning needs a token in portal settings (or the
+`HETZNER_API_TOKEN` fallback), access to the provider API/GHCR and, for verification,
+OpenSSH on the portal host (`SSH_BINARY` overrides detection), writable private
+temporary storage and SSH access to the VM's public IPv4 on port 22. Automatic
+engine installation currently requires Ubuntu 24.04 and a selected official
+Luanti image. Image verification is separate from deploying the Linux/systemd
+bridge, game content and public endpoints.
+
+Keep `.env`, credentials, SQLite files, logs, runtime data, `vendor`,
+`node_modules`, published Filament assets and frontend builds out of Git. Commit
+lockfiles and the empty `.env.example`. The bridge, parent VS Code workspace and
+`.dev-tools` are separate from this repository.
