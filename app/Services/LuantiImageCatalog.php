@@ -8,6 +8,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class LuantiImageCatalog
@@ -33,15 +34,17 @@ class LuantiImageCatalog
     public function refresh(User $actor): array
     {
         Gate::forUser($this->access->currentUser($actor))->authorize('viewAny', LuantiServer::class);
+        $stage = 'token';
         try {
             $response = Http::acceptJson()->connectTimeout(3)->timeout(6)->withoutRedirecting()
                 ->get('https://ghcr.io/token', ['service' => 'ghcr.io', 'scope' => 'repository:luanti-org/luanti:pull']);
             $token = $response->json('token');
             if (! $response->ok() || ! is_string($token) || blank($token) || strlen($token) > 8192 || preg_match('/\s/', $token)) {
-                $this->fail();
+                $this->fail('invalid_token_response', ['status' => $response->status()]);
             }
             $tags = [];
             $last = null;
+            $stage = 'tags';
             for ($page = 0; $page < 5; $page++) {
                 $query = ['n' => 100];
                 if ($last !== null) {
@@ -51,11 +54,11 @@ class LuantiImageCatalog
                     ->get('https://ghcr.io/v2/luanti-org/luanti/tags/list', $query);
                 $batch = $response->json('tags');
                 if (! $response->ok() || $response->json('name') !== 'luanti-org/luanti' || ! is_array($batch) || ! array_is_list($batch)) {
-                    $this->fail();
+                    $this->fail('invalid_tags_response', ['status' => $response->status()]);
                 }
                 foreach ($batch as $tag) {
                     if (! is_string($tag) || ! preg_match('/\A[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\z/', $tag)) {
-                        $this->fail();
+                        $this->fail('invalid_tag');
                     }
                     $tags[$tag] = $tag;
                 }
@@ -64,15 +67,19 @@ class LuantiImageCatalog
                 }
                 $next = $batch === [] ? null : $batch[array_key_last($batch)];
                 if ($page === 4 || $next === null || $next === $last) {
-                    $this->fail();
+                    $this->fail('invalid_pagination');
                 }
                 $last = $next;
             }
-        } catch (ConnectionException) {
-            $this->fail();
+        } catch (ConnectionException $exception) {
+            preg_match('/\bcURL error (\d+):/', $exception->getMessage(), $matches);
+            $this->fail('connection_failed', [
+                'stage' => $stage,
+                'curl_error' => isset($matches[1]) ? (int) $matches[1] : null,
+            ]);
         }
         if ($tags === []) {
-            $this->fail();
+            $this->fail('empty_tags');
         }
         usort($tags, function (string $first, string $second): int {
             $firstIsVersion = preg_match('/\A\d+\.\d+\.\d+(?:[-.].*)?\z/', $first) === 1;
@@ -95,8 +102,11 @@ class LuantiImageCatalog
         return $images;
     }
 
-    private function fail(): never
+    /** @param array{stage?: string, status?: int, curl_error?: int|null} $context */
+    private function fail(string $reason, array $context = []): never
     {
+        Log::warning('Luanti image catalog refresh failed', ['reason' => $reason, ...$context]);
+
         throw ValidationException::withMessages([
             'luanti_docker_image' => 'Die Image-Liste konnte nicht geladen werden. Die bisherige Liste und das gewählte Image bleiben erhalten.',
         ]);

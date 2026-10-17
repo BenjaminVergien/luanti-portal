@@ -2,10 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ProvisionLuantiBridge;
 use App\Models\LuantiGameInstance;
 use App\Models\LuantiServer;
 use App\Models\LuantiWorldTemplate;
 use App\Models\User;
+use App\Services\BridgeProvisioning;
 use App\Services\HetznerVirtualMachines;
 use App\Services\LuantiServerRegistry;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -13,6 +15,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Validation\ValidationException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Symfony\Component\HttpKernel\Exception\HttpException;
@@ -21,6 +24,24 @@ use Tests\TestCase;
 class HetznerVirtualMachinesTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_vm_creation_queues_bridge_installation_with_the_preflighted_commit(): void
+    {
+        $admin = User::factory()->globalAdmin()->create();
+        Queue::fake();
+        $this->mock(BridgeProvisioning::class)->shouldReceive('prepare')->once()->withArgs(fn (User $actor): bool => $actor->id === $admin->id)
+            ->andReturn(['commit' => str_repeat('a', 40), 'configuration' => ['repository' => 'Owner/Bridge', 'ref' => 'main']]);
+        Http::preventStrayRequests();
+        $this->fakeKeyRegistration();
+        Http::fake(['https://api.hetzner.cloud/v1/servers' => function () {
+            return Http::response(['server' => $this->remoteServer(LuantiServer::query()->sole(), 'initializing')], 201);
+        }]);
+        $server = app(HetznerVirtualMachines::class)->create($admin, $this->vmData());
+        $this->assertSame('pending', $server->bridge_status);
+        $this->assertSame(str_repeat('a', 40), $server->bridge_commit);
+        $this->assertSame($admin->id, $server->bridge_requested_by);
+        Queue::assertPushed(ProvisionLuantiBridge::class, fn ($job): bool => $job->serverId === $server->id);
+    }
 
     protected function setUp(): void
     {

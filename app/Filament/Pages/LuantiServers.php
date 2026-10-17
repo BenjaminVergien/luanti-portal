@@ -3,12 +3,14 @@
 namespace App\Filament\Pages;
 
 use App\Models\LuantiServer;
+use App\Services\BridgeProvisioning;
 use App\Services\HetznerVirtualMachines;
 use App\Services\LuantiApiConnectionChecker;
 use App\Services\LuantiDockerInstallation;
 use App\Services\LuantiServerRegistry;
 use App\Services\LuantiWorldTemplateSynchronizer;
 use App\Services\PortalSettings;
+use App\Services\ProvisionedBridgeTransport;
 use Closure;
 use Filament\Actions\Action;
 use Filament\Facades\Filament;
@@ -43,11 +45,17 @@ class LuantiServers extends AccessTablePage
         return [
             Action::make('createVm')->label('Hetzner-VM erstellen')
                 ->modalHeading('Hetzner-VM erstellen')
-                ->modalDescription('Erstellt eine kostenpflichtige VM mit eigenem SSH-Schlüssel. Wenn ein Luanti-Image gewählt ist, installiert die VM Docker und dieses Image beim ersten Start automatisch.')
+                ->modalDescription('Erstellt eine kostenpflichtige VM mit eigenem SSH-Schlüssel. Docker und das ausgewählte Luanti-Image werden automatisch installiert. Wenn die Bridge-Installation in den Einstellungen aktiviert ist, richtet das Portal anschließend die Bridge aus GitHub ein.')
                 ->modalSubmitActionLabel('Kostenpflichtige VM erstellen')
                 ->schema([
                     TextEntry::make('selected_luanti_image')->label('Luanti-Image')
                         ->state(fn (): string => app(PortalSettings::class)->luantiDockerImage() ?? 'Keines gewählt – nur VM erstellen'),
+                    TextEntry::make('selected_bridge')->label('Bridge')
+                        ->state(function (): string {
+                            $settings = app(PortalSettings::class)->bridge();
+
+                            return $settings['bridge_enabled'] ? $settings['bridge_repository'].' · '.$settings['bridge_ref'] : 'Automatische Installation deaktiviert';
+                        }),
                     TextInput::make('name')->label('VM-Name')->required()->minLength(2)->maxLength(253)
                         ->rules(HetznerVirtualMachines::nameRules())
                         ->mutateStateForValidationUsing(fn (?string $state): ?string => $state === null ? null : strtolower(trim($state)))
@@ -73,7 +81,7 @@ class LuantiServers extends AccessTablePage
 
     public function table(Table $table): Table
     {
-        return $table->query(fn () => app(LuantiServerRegistry::class)->query($this->actor()))->columns([
+        return $table->query(fn () => app(LuantiServerRegistry::class)->query($this->actor()))->poll('10s')->columns([
             TextColumn::make('name')->label('Name')->searchable()->sortable(),
             TextColumn::make('domain')->label('Domain')->placeholder('Noch nicht eingerichtet')->sortable(),
             TextColumn::make('hetzner_status')->label('VM-Status')
@@ -85,16 +93,31 @@ class LuantiServers extends AccessTablePage
             TextColumn::make('luanti_installation_status')->label('Luanti-Installation')
                 ->getStateUsing(fn (LuantiServer $record): string => $record->installationStatusLabel()),
             TextColumn::make('luanti_docker_image')->label('Luanti-Image')->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('bridge_status')->label('Bridge')->formatStateUsing(fn (?string $state): string => match ($state) {
+                'pending' => 'Wartet auf Luanti', 'installing' => 'Wird installiert', 'installed' => 'Installiert und geprüft',
+                'failed' => 'Installation nicht bestätigt', 'deleted' => 'VM gelöscht', default => 'Nicht eingerichtet',
+            })->placeholder('Nicht eingerichtet'),
+            TextColumn::make('bridge_commit')->label('Bridge-Commit')->limit(12)->tooltip(fn (LuantiServer $record): ?string => $record->bridge_commit)->toggleable(),
+            TextColumn::make('bridge_error')->label('Bridge-Installation')->wrap()->toggleable(),
             TextColumn::make('luanti_engine_version')->label('Engine-Version')->placeholder('Noch nicht geprüft')->toggleable(),
             TextColumn::make('luanti_verified_at')->label('Installation geprüft am')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('luanti_installation_error')->label('Installation/Prüfung')->wrap()->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('game_port')->label('Spiel-Port'),
-            TextColumn::make('api_base_url')->label('HTTPS-API-URL')->placeholder('Nicht konfiguriert')->wrap(),
+            TextColumn::make('api_base_url')->label('HTTPS-API-Verbindung')->placeholder('Nicht konfiguriert')->wrap()
+                ->formatStateUsing(fn (string $state, LuantiServer $record): string => $record->bridge_status === 'installed'
+                    && $state === ProvisionedBridgeTransport::origin($record) ? 'Privat über SSH' : $state),
             IconColumn::make('has_api_token')->label('API-Token hinterlegt')
                 ->getStateUsing(fn (LuantiServer $record): bool => filled($record->getRawOriginal('api_token')))->boolean(),
             TextColumn::make('worlds_synced_at')->label('Weltvorlagen synchronisiert')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('Noch nicht synchronisiert'),
             TextColumn::make('world_sync_error')->label('Letzter Synchronisierungsfehler')->placeholder('–')->wrap(),
         ])->recordActions([
+            Action::make('retryBridge')->label('Bridge-Installation erneut versuchen')
+                ->visible(fn (LuantiServer $record): bool => $record->bridge_configuration !== null
+                    && $record->bridge_status === 'failed' && $record->hetzner_status === 'running')
+                ->action(function (LuantiServer $record): void {
+                    app(BridgeProvisioning::class)->retry($this->actor(), $record);
+                    Notification::make()->title('Bridge-Installation erneut angefragt')->success()->send();
+                }),
             Action::make('verifyInstallation')->label('Installation prüfen')
                 ->visible(fn (LuantiServer $record): bool => $record->luanti_docker_image !== null
                     && $record->provisioning_host_public_key !== null

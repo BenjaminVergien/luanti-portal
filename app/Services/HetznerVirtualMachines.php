@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Jobs\ProvisionLuantiBridge;
 use App\Models\LuantiServer;
 use App\Models\User;
 use Closure;
@@ -66,8 +67,9 @@ class HetznerVirtualMachines
         if ($luantiImage !== null && $data['image'] !== 'ubuntu-24.04') {
             throw ValidationException::withMessages(['image' => 'Die automatische Luanti-Installation benötigt derzeit Ubuntu 24.04.']);
         }
+        $bridge = app(BridgeProvisioning::class)->prepare($actor);
 
-        return $this->withLock('create:'.$data['name'], function () use ($actor, $data, $luantiImage): LuantiServer {
+        return $this->withLock('create:'.$data['name'], function () use ($actor, $data, $luantiImage, $bridge): LuantiServer {
             Gate::forUser($this->access->currentUser($actor))->authorize('create', LuantiServer::class);
             if (LuantiServer::query()->where('hetzner_name', $data['name'])->exists()) {
                 throw ValidationException::withMessages(['name' => 'Für diesen VM-Namen besteht bereits ein Eintrag. Bitte dessen Status aktualisieren.']);
@@ -77,6 +79,8 @@ class HetznerVirtualMachines
                 'hetzner_reference' => (string) Str::uuid(), 'hetzner_name' => $data['name'], 'hetzner_status' => 'key_pending',
                 'hetzner_create_payload' => $data,
                 'luanti_docker_image' => $luantiImage,
+                'bridge_configuration' => $bridge['configuration'] ?? null, 'bridge_commit' => $bridge['commit'] ?? null,
+                'bridge_status' => $bridge === null ? null : 'pending', 'bridge_requested_by' => $bridge === null ? null : $actor->id,
             ])->save();
 
             return $this->withLock((string) $server->id, fn (): LuantiServer => $this->submitVm($actor, $server));
@@ -127,7 +131,12 @@ class HetznerVirtualMachines
             return $this->saveError($server, 'Ergebnis der Erstellung unbekannt. Bitte Status aktualisieren.', 'unknown');
         }
 
-        return $this->saveRemote($server, $response->json('server'));
+        $server = $this->saveRemote($server, $response->json('server'));
+        if ($server->bridge_status === 'pending') {
+            ProvisionLuantiBridge::dispatch($server->id)->afterCommit()->delay(now()->addSeconds(30));
+        }
+
+        return $server;
     }
 
     public function refresh(User $actor, LuantiServer $server): LuantiServer
@@ -279,6 +288,7 @@ class HetznerVirtualMachines
             'hetzner_ssh_key_id' => null, 'hetzner_create_payload' => null,
             'provisioning_cloud_config' => null, 'provisioning_host_public_key' => null,
             'luanti_installation_status' => $server->luanti_docker_image === null ? null : 'deleted', 'luanti_verified_at' => null,
+            'bridge_status' => $server->bridge_status === null ? null : 'deleted', 'bridge_ca_certificate' => null,
         ])->save();
 
         return $server;

@@ -1,3 +1,9 @@
+# Local Development Environment
+
+- Always start or restart the portal development stack outside the Codex execution sandbox, with unrestricted host network access. Use `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1 start` from the project directory.
+- When launching through `exec_command`, set `sandbox_permissions: "require_escalated"` on the launch command so the development server and its child processes inherit the unrestricted environment. This is required for outbound requests such as loading Luanti image tags from GHCR; a sandboxed server previously failed with cURL error 7 even though the same request succeeded outside the sandbox.
+- Keep development services bound to `127.0.0.1`. For background launches with `Start-Process`, use `-WindowStyle Hidden`.
+
 <laravel-boost-guidelines>
 === foundation rules ===
 

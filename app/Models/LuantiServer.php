@@ -10,7 +10,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 #[Fillable(['name', 'notes', 'domain', 'game_port', 'api_base_url', 'api_token'])]
-#[Hidden(['api_token', 'provisioning_private_key', 'provisioning_public_key', 'hetzner_create_payload', 'provisioning_host_public_key', 'provisioning_cloud_config'])]
+#[Hidden(['api_token', 'provisioning_private_key', 'provisioning_public_key', 'hetzner_create_payload', 'provisioning_host_public_key', 'provisioning_cloud_config', 'bridge_configuration', 'bridge_ca_certificate'])]
 class LuantiServer extends Model
 {
     /** @use HasFactory<LuantiServerFactory> */
@@ -23,6 +23,7 @@ class LuantiServer extends Model
             'hetzner_server_id' => 'integer', 'hetzner_ssh_key_id' => 'integer',
             'provisioning_private_key' => 'encrypted', 'hetzner_create_payload' => 'array',
             'provisioning_cloud_config' => 'encrypted', 'luanti_verified_at' => 'datetime',
+            'bridge_configuration' => 'encrypted:array', 'bridge_installed_at' => 'datetime',
         ];
     }
 

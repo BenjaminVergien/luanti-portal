@@ -20,6 +20,10 @@ class BridgeHttpClient
 
     public function send(string $method, string $url, #[SensitiveParameter] string $token, int $timeoutSeconds, #[SensitiveParameter] ?string $body = null): Response
     {
+        $managed = app(ProvisionedBridgeTransport::class);
+        if ($managed->handles($url)) {
+            return $managed->send($method, $url, $token, $timeoutSeconds, $body);
+        }
         $sink = new BoundedBridgeResponseStream;
         $response = null;
 

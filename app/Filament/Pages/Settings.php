@@ -3,6 +3,7 @@
 namespace App\Filament\Pages;
 
 use App\Models\User;
+use App\Services\GithubBridgeSource;
 use App\Services\HetznerCloudClient;
 use App\Services\HetznerSettings as HetznerConfiguration;
 use App\Services\LuantiImageCatalog;
@@ -12,6 +13,7 @@ use Filament\Actions\Action;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
@@ -29,7 +31,7 @@ class Settings extends Page
 
     protected string $view = 'filament.pages.settings';
 
-    /** @var array{api_token?: ?string, luanti_docker_image?: ?string} */
+    /** @var array<string, mixed>|null */
     public ?array $data = [];
 
     public static function canAccess(): bool
@@ -72,6 +74,21 @@ class Settings extends Page
                     TextInput::make('api_token')->label('Hetzner-API-Token')->password()->autocomplete('off')->maxLength(256)
                         ->helperText('Wird verschlüsselt gespeichert und nie wieder angezeigt. Leer lassen, um den gespeicherten Token beizubehalten.'),
                 ]),
+            Section::make('Bridge aus GitHub')->description('Neue VMs erhalten automatisch den ausgewählten Bridge-Stand. Bestehende Server werden nicht aktualisiert.')
+                ->schema([
+                    Toggle::make('bridge_enabled')->label('Bridge bei neuen VMs automatisch installieren'),
+                    TextInput::make('bridge_repository')->label('GitHub-Repository')->required()->maxLength(200)
+                        ->helperText('Eigentümer/Repository, z. B. Stewie23/luanti-connect. Private Repositories werden unterstützt.'),
+                    TextInput::make('bridge_ref')->label('Branch, Tag oder Commit')->required()->maxLength(200)
+                        ->helperText('Standard: main. Pro Installation wird der genaue Commit gespeichert; spätere Branch-Änderungen ändern bestehende Server nicht.'),
+                    TextEntry::make('github_token_status')->label('GitHub-Zugang')
+                        ->state(fn (): string => filled(app(PortalSettings::class)->githubToken()) ? 'Token hinterlegt' : 'Kein Token hinterlegt – nur öffentliche Repositories'),
+                    TextInput::make('bridge_github_token')->label('GitHub-Token')->password()->autocomplete('off')->maxLength(512)
+                        ->helperText('Fine-grained Token nur für dieses Repository mit Contents: read-only. Wird verschlüsselt im Portal gespeichert und nicht an VMs übertragen. Leer lassen, um ihn beizubehalten.'),
+                    TextInput::make('bridge_game_source')->label('Minetest-Game-Verzeichnis auf dem Portal-Host')->maxLength(2048)
+                        ->helperText('Vorhandene, geprüfte Spieldateien mit game.conf. Die Dateien werden übertragen; Spiele und Weltvorlagen werden nicht automatisch heruntergeladen.'),
+                    TextInput::make('bridge_admin_name')->label('Luanti-Administratorname')->required()->maxLength(20),
+                ]),
         ]);
     }
 
@@ -92,6 +109,29 @@ class Settings extends Page
     protected function getHeaderActions(): array
     {
         return [
+            Action::make('checkBridgeSource')->label('Gespeicherten GitHub-Zugang prüfen')
+                ->action(function (): void {
+                    abort_unless(static::canAccess(), 403);
+                    $settings = app(PortalSettings::class)->bridge();
+                    try {
+                        $source = app(GithubBridgeSource::class);
+                        $commit = $source->resolve($settings['bridge_repository'], $settings['bridge_ref']);
+                        $source->bundle($settings['bridge_repository'], $commit);
+                    } catch (ValidationException $exception) {
+                        Notification::make()->title('GitHub-Zugang nicht bestätigt')->body(collect($exception->errors())->flatten()->first())->danger()->send();
+
+                        return;
+                    }
+                    Notification::make()->title('Bridge aus GitHub verfügbar')->body('Docker-Installer im Commit '.substr($commit, 0, 12).' gefunden.')->success()->send();
+                }),
+            Action::make('removeGithubToken')->label('GitHub-Token entfernen')->color('danger')->requiresConfirmation()
+                ->visible(fn (): bool => filled(app(PortalSettings::class)->githubToken()))
+                ->action(function (): void {
+                    abort_unless(static::canAccess(), 403);
+                    app(PortalSettings::class)->removeGithubToken($this->actor());
+                    $this->data['bridge_github_token'] = null;
+                    Notification::make()->title('GitHub-Token entfernt')->success()->send();
+                }),
             Action::make('refreshImages')->label('Image-Liste aktualisieren')
                 ->action(fn () => $this->refreshImages()),
             Action::make('checkConnection')->label('Gespeicherten API-Zugang prüfen')
@@ -138,7 +178,7 @@ class Settings extends Page
 
     private function fillSettings(): void
     {
-        $this->form->fill(['luanti_docker_image' => app(PortalSettings::class)->luantiDockerImage()]);
+        $this->form->fill(['luanti_docker_image' => app(PortalSettings::class)->luantiDockerImage(), ...app(PortalSettings::class)->bridge()]);
     }
 
     /** @return array<string, string> */

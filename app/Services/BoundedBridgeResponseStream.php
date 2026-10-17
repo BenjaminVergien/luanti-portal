@@ -17,14 +17,14 @@ class BoundedBridgeResponseStream implements StreamInterface
 
     private bool $exceeded = false;
 
-    public function __construct()
+    public function __construct(private int $limit = BridgeHttpClient::MAX_RESPONSE_BYTES)
     {
         $this->stream = Utils::streamFor(Utils::tryFopen('php://temp', 'w+'));
     }
 
     public function write(#[SensitiveParameter] string $string): int
     {
-        if ($this->exceeded || strlen($string) > BridgeHttpClient::MAX_RESPONSE_BYTES - $this->bytesWritten) {
+        if ($this->exceeded || strlen($string) > $this->limit - $this->bytesWritten) {
             $this->exceeded = true;
 
             throw new BridgeResponseTooLargeException;

@@ -9,6 +9,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -102,13 +103,26 @@ class LuantiImageCatalogTest extends TestCase
         Http::assertSentCount(2);
     }
 
-    public function test_connection_failure_preserves_previous_catalog(): void
+    /** @return array<string, array{string, int}> */
+    public static function connectionFailures(): array
+    {
+        return ['token request' => ['token', 1], 'tags request' => ['tags', 2]];
+    }
+
+    #[DataProvider('connectionFailures')]
+    public function test_connection_failure_preserves_previous_catalog(string $stage, int $requestCount): void
     {
         $admin = User::factory()->globalAdmin()->create();
         $cached = ['images' => ['ghcr.io/luanti-org/luanti:5.16.1' => '5.16.1'], 'fetched_at' => 1];
         Cache::forever(LuantiImageCatalog::CacheKey, $cached);
+        Log::spy();
         Http::preventStrayRequests();
-        Http::fake(['https://ghcr.io/token?*' => Http::failedConnection('private-details')]);
+        Http::fake([
+            'https://ghcr.io/token?*' => $stage === 'token'
+                ? Http::failedConnection('cURL error 7: private-details')
+                : Http::response(['token' => 'registry-token']),
+            'https://ghcr.io/v2/luanti-org/luanti/tags/list?*' => Http::failedConnection('cURL error 7: private-details'),
+        ]);
 
         try {
             app(LuantiImageCatalog::class)->refresh($admin);
@@ -118,7 +132,10 @@ class LuantiImageCatalogTest extends TestCase
         }
 
         $this->assertSame($cached, Cache::get(LuantiImageCatalog::CacheKey));
-        Http::assertSentCount(1);
+        Http::assertSentCount($requestCount);
+        Log::shouldHaveReceived('warning')->once()->with('Luanti image catalog refresh failed', [
+            'reason' => 'connection_failed', 'stage' => $stage, 'curl_error' => 7,
+        ]);
     }
 
     public function test_invalid_registry_token_is_rejected_before_requesting_tags(): void

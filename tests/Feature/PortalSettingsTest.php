@@ -9,9 +9,12 @@ use App\Services\LuantiImageCatalog;
 use App\Services\PortalSettings;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\Select;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -19,6 +22,41 @@ use Tests\TestCase;
 class PortalSettingsTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_bridge_settings_keep_github_credentials_encrypted_and_out_of_livewire_state(): void
+    {
+        $admin = User::factory()->globalAdmin()->create();
+        $this->adminPanel($admin);
+        $this->cacheImages(['5.17.0']);
+        Http::preventStrayRequests();
+        $page = Livewire::test(Settings::class)->fillForm(['bridge_github_token' => 'fictitious-github-read-secret',
+            'bridge_repository' => 'Owner/Bridge', 'bridge_ref' => 'main', 'bridge_enabled' => true])
+            ->call('save')->assertHasNoFormErrors()->assertFormSet(['bridge_github_token' => null]);
+        $this->assertSame('fictitious-github-read-secret', app(PortalSettings::class)->githubToken());
+        $this->assertNotSame('fictitious-github-read-secret', DB::table('portal_settings')->value('bridge_github_token'));
+        $this->assertStringNotContainsString('fictitious-github-read-secret', json_encode([$page->snapshot, $page->effects]));
+        Livewire::test(Settings::class)->call('save')->assertHasNoFormErrors();
+        $this->assertSame('fictitious-github-read-secret', app(PortalSettings::class)->githubToken());
+        $page->callAction('removeGithubToken')->assertNotified('GitHub-Token entfernt');
+        $this->assertNull(app(PortalSettings::class)->githubToken());
+        $this->assertTrue(app(PortalSettings::class)->bridge()['bridge_enabled']);
+        Http::assertNothingSent();
+    }
+
+    public function test_bridge_validation_is_atomic_and_non_admin_cannot_replace_github_token(): void
+    {
+        $admin = User::factory()->globalAdmin()->create();
+        $settings = app(PortalSettings::class);
+        $settings->save($admin, ['bridge_github_token' => 'retained-test-token']);
+        try {
+            $settings->save($admin, ['bridge_repository' => 'https://attacker.example/repo', 'bridge_github_token' => 'replacement-test-token']);
+            $this->fail('Invalid source was saved.');
+        } catch (ValidationException) {
+            $this->assertSame('retained-test-token', $settings->githubToken());
+        }
+        $this->expectException(AuthorizationException::class);
+        $settings->save(User::factory()->create(), ['bridge_github_token' => 'replacement-test-token']);
+    }
 
     private function adminPanel(User $user): void
     {
