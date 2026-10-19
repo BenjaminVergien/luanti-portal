@@ -187,7 +187,7 @@ class HetznerProvisioningKeyTest extends TestCase
         ]);
         $service = app(HetznerVirtualMachines::class);
 
-        $service->delete($admin, $server);
+        $service->delete($admin, $server, $server->name);
 
         Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/ssh_keys'));
         $this->assertNotNull($server->fresh()->provisioning_private_key);
@@ -241,7 +241,7 @@ class HetznerProvisioningKeyTest extends TestCase
         Http::fake(['https://api.hetzner.cloud/v1/ssh_keys/12' => Http::sequence()
             ->push(['ssh_key' => $this->remoteKey($server)])->pushStatus(204)]);
 
-        app(HetznerVirtualMachines::class)->delete($admin, $server);
+        app(HetznerVirtualMachines::class)->delete($admin, $server, $server->name);
 
         $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'hetzner_status' => 'deleted', 'provisioning_private_key' => null]);
         Http::assertSentCount(2);
@@ -283,7 +283,7 @@ class HetznerProvisioningKeyTest extends TestCase
             $this->assertArrayHasKey('server', $exception->errors());
         }
 
-        app(HetznerVirtualMachines::class)->delete($admin, $server);
+        app(HetznerVirtualMachines::class)->delete($admin, $server, $server->name);
 
         $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'hetzner_status' => 'deleted', 'provisioning_private_key' => null]);
         Http::assertSentCount(2);

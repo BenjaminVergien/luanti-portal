@@ -6,10 +6,9 @@ record of a tested deployment. It targets a single Ubuntu VM you control, PHP
 `portal@bensfoundry.de`. The game server and bridge remain separate services.
 An external SMTP provider remains an alternative if direct delivery fails.
 
-Replace `portal.example.org`, the repository URL, and installation paths below
-with your own values. `portal.bensfoundry.de` would be one possible portal host;
-confirm your actual choice before setting DNS or `APP_URL`. Use a
-dedicated portal subdomain at its root, not a subdirectory of the Foundry site.
+The chosen portal hostname is `portal.bensfoundry.de`. Replace the repository
+URL and installation paths below with your own values. Serve this subdomain at
+its root, not a subdirectory of the Foundry site.
 
 ## 1. Inventory and prepare the host
 
@@ -38,25 +37,74 @@ Required tooling:
   reliable deployment requirement.
 - PHP extensions: ctype, curl, dom, fileinfo, filter, hash, iconv, intl, JSON,
   libxml, mbstring, OpenSSL, PDO/SQLite, session, tokenizer, xmlreader and zip.
-  CLI `pcntl` is needed for queue timeouts; enable OPcache for FPM.
+  CLI `pcntl` is needed for queue timeouts; enable OPcache for FPM. OPcache is
+  built into PHP 8.5, so no separate `php8.5-opcache` package is needed.
 - Composer 2, Git, CA certificates and the SQLite CLI. OpenSSH client is required
   if the portal will provision or verify game VMs.
 - A Node version supported by the locked Vite version on the **build machine**
   (Node 22.12+ or Node 24); Node is not needed to serve compiled assets.
 
-Check package availability first. Ubuntu releases differ; if PHP 8.5 has no
-candidate, provision it from an appropriate trusted package source for that
-Ubuntu release before continuing. Do not change Foundry's Node installation.
+The current host runs Ubuntu 24.04 with Nginx, Certbot and PHP 8.3-FPM already
+installed. Install versioned PHP 8.5 CLI/FPM alongside it. Do not change
+Foundry's Node installation or the PHP-FPM targets of existing sites.
+
+Ubuntu 24.04's current configured sources do not provide PHP 8.5. The community
+[Ondřej Surý PHP PPA](https://launchpad.net/~ondrej/+archive/ubuntu/php) provides
+co-installable versions. Add it with a lower APT priority to prefer the existing
+distribution sources for packages they already supply. Allow the PPA's newer
+`php-common` explicitly: PHP 8.5 requires at least `2:95~`, while Ubuntu's
+`2:93ubuntu2` does not satisfy that dependency. This shared package is distinct
+from the versioned PHP 8.3 interpreter and extensions.
 
 ```bash
-apt-cache policy php8.5-cli php8.5-fpm
 sudo apt update
-sudo apt install php8.5-cli php8.5-fpm php8.5-opcache php8.5-curl \
+sudo apt install software-properties-common
+sudo add-apt-repository ppa:ondrej/php
+sudo tee /etc/apt/preferences.d/luanti-php >/dev/null <<'EOF'
+Package: php-common
+Pin: release o=LP-PPA-ondrej-php
+Pin-Priority: 501
+
+Package: *
+Pin: release o=LP-PPA-ondrej-php
+Pin-Priority: 100
+EOF
+sudo apt update
+apt-cache policy php-common php8.5-cli php8.5-fpm
+php -v
+update-alternatives --query php
+sudo apt-get -s install --no-install-recommends php8.5-cli php8.5-fpm \
+  php8.5-curl php8.5-mbstring php8.5-xml php8.5-intl php8.5-zip \
+  php8.5-sqlite3 git unzip sqlite3 ca-certificates openssh-client
+```
+
+Inspect the simulation for removals or changes to existing PHP 8.3/web-server
+packages before installing. Record the current default CLI PHP/alternatives;
+installation may select a newer default, so restore the previous default if
+needed and use `php8.5` explicitly for portal commands. Do not run a broad
+`apt upgrade` as part of this installation. After checking the simulation:
+
+On this host, the simulation removes the unversioned `php-apcu` and
+`php-imagick` wrapper packages while retaining `php8.3-apcu` and
+`php8.3-imagick`. Mark those installed versioned extensions as manual so they
+remain protected from later automatic cleanup. Preserve the existing PHP 8.3
+CLI explicitly before installing the second version:
+
+```bash
+sudo apt-mark manual php8.3-apcu php8.3-imagick
+sudo update-alternatives --set php /usr/bin/php8.3
+sudo apt install --no-install-recommends php8.5-cli php8.5-fpm php8.5-curl \
   php8.5-mbstring php8.5-xml php8.5-intl php8.5-zip php8.5-sqlite3 \
   git unzip sqlite3 ca-certificates openssh-client
 php8.5 -v
 php8.5 -m
+php -v
+php8.3 -m | grep -Ei 'apcu|imagick'
+systemctl is-active php8.3-fpm php8.5-fpm
 ```
+
+Confirm the install summary still matches the reviewed simulation. Do not run
+`apt autoremove` during deployment; review that separate cleanup another time.
 
 Install Composer using its [official instructions](https://getcomposer.org/download/)
 and verify that it runs under PHP 8.5. The commands below assume Composer's PHP
@@ -232,7 +280,7 @@ the other application defaults from `.env.example`, and set:
 APP_NAME="Luanti-Portal"
 APP_ENV=production
 APP_DEBUG=false
-APP_URL=https://portal.example.org
+APP_URL=https://portal.bensfoundry.de
 APP_LOCALE=de
 APP_TIMEZONE=Europe/Berlin
 APP_KEY=
@@ -321,18 +369,21 @@ Create `/etc/php/8.5/fpm/pool.d/luanti-portal.conf`:
 user = portal
 group = portal
 listen = /run/php/luanti-portal.sock
-listen.owner = www-data
+listen.owner = ben
 listen.group = www-data
 listen.mode = 0660
 pm = ondemand
-pm.max_children = 4
+pm.max_children = 2
 pm.process_idle_timeout = 10s
 pm.max_requests = 500
 chdir = /srv/luanti-portal/app
 catch_workers_output = yes
 ```
 
-Adjust the socket owner/group to your actual web-server identity and size
+On this host, Nginx workers run as `ben`, so the socket owner is `ben` while
+the PHP application processes still run as `portal`. Verify worker identity
+with `ps -o user,pid,args -C nginx` rather than assuming Ubuntu's `www-data`
+default. Adjust the socket owner/group to your actual web-server identity and size
 `pm.max_children` to leave sufficient memory for Foundry and the queue worker.
 The web server needs directory traversal/read access to `public/`; only the
 portal PHP worker needs access to `.env`, the database and private storage.
@@ -349,10 +400,10 @@ with the host's existing ACME process first. Redirect HTTP to this HTTPS host.
 ```nginx
 server {
     listen 443 ssl;
-    server_name portal.example.org;
+    server_name portal.bensfoundry.de;
     # Use the certificate paths and TLS settings from the host's ACME setup.
-    ssl_certificate /etc/letsencrypt/live/portal.example.org/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/portal.example.org/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/portal.bensfoundry.de/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/portal.bensfoundry.de/privkey.pem;
     root /srv/luanti-portal/app/public;
     index index.php;
     charset utf-8;
@@ -377,7 +428,7 @@ server {
 For Caddy running directly on the host, an additional site can instead use:
 
 ```caddyfile
-portal.example.org {
+portal.bensfoundry.de {
     root * /srv/luanti-portal/app/public
     @private path /.env /.git/*
     respond @private 404
@@ -401,12 +452,36 @@ existing service workflow. With Nginx:
 ```bash
 sudo nginx -t
 sudo systemctl reload nginx
-curl --fail https://portal.example.org/up
+curl --fail https://portal.bensfoundry.de/up
 ```
 
 Match web-server and PHP `upload_max_filesize` / `post_max_size` limits to the
 template ZIPs you plan to upload. Check Foundry after the reload. The `/up` route
 alone does not prove database, mail, queue or game readiness.
+
+### Reload Nginx after webroot certificate renewal
+
+With `certbot certonly --webroot`, the certificate files renew independently
+of Nginx. Keep the HTTP `/.well-known/acme-challenge/` location reachable and
+add a deploy hook restricted to this certificate:
+
+```bash
+sudo install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
+sudo tee /etc/letsencrypt/renewal-hooks/deploy/luanti-portal-nginx >/dev/null <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${RENEWED_LINEAGE:-}" = /etc/letsencrypt/live/portal.bensfoundry.de ]; then
+    /usr/sbin/nginx -t
+    /usr/bin/systemctl reload nginx
+fi
+EOF
+sudo chmod 755 /etc/letsencrypt/renewal-hooks/deploy/luanti-portal-nginx
+sudo certbot renew --cert-name portal.bensfoundry.de --dry-run --run-deploy-hooks
+```
+
+The dry run tests renewal and the reload hook without replacing the live
+certificate. Check the existing Certbot renewal timer/cron remains enabled.
+See [Certbot's hook and dry-run documentation](https://eff-certbot.readthedocs.io/en/stable/using.html#renewing-certificates).
 
 ## 5. Queue worker and scheduler
 
@@ -427,6 +502,7 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=1260
 KillSignal=SIGTERM
+KillMode=mixed
 UMask=0077
 
 [Install]

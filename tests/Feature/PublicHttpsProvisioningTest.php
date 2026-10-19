@@ -282,7 +282,7 @@ class PublicHttpsProvisioningTest extends TestCase
 
             return $remote === null ? Http::response([], 404) : Http::response(['server' => $remote]);
         }]);
-        app(HetznerVirtualMachines::class)->delete($actor, $server);
+        app(HetznerVirtualMachines::class)->delete($actor, $server, $server->name);
         $this->assertSame('deleting', $server->fresh()->hetzner_status);
         Queue::assertNotPushed(CleanupLuantiDns::class);
         app(HetznerVirtualMachines::class)->refresh($actor, $server->fresh());

@@ -105,7 +105,7 @@ class HetznerVirtualMachineActionsTest extends TestCase
         ]])->push(['action' => ['status' => 'running']])->push([], 404)]);
 
         $page = Livewire::test(LuantiServers::class)->assertActionHidden(TestAction::make('delete')->table($server))
-            ->callAction(TestAction::make('deleteVm')->table($server))->assertNotified('Wird gelöscht');
+            ->callAction(TestAction::make('deleteVm')->table($server), ['confirmation_name' => $server->name])->assertNotified('Wird gelöscht');
         $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'hetzner_status' => 'deleting']);
 
         $page->callAction(TestAction::make('refreshVm')->table($server))->assertNotified('Gelöscht')
@@ -114,6 +114,40 @@ class HetznerVirtualMachineActionsTest extends TestCase
 
         $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'hetzner_status' => 'deleted']);
         Http::assertSentCount(3);
+    }
+
+    public function test_vm_deletion_dialog_requires_the_exact_name_and_explains_world_data_loss(): void
+    {
+        $this->adminPanel(User::factory()->globalAdmin()->create());
+        $server = LuantiServer::factory()->hetznerVm()->create(['name' => 'happy-grove']);
+        Http::preventStrayRequests();
+
+        $page = Livewire::test(LuantiServers::class)->mountAction(TestAction::make('deleteVm')->table($server))
+            ->assertMountedActionModalSee('Spielfortschritte')
+            ->assertMountedActionModalSee('Es wird keine Sicherung erstellt.')
+            ->assertMountedActionModalSee('happy-grove');
+        $page->callMountedAction()->assertHasActionErrors(['confirmation_name' => 'required']);
+        $page->fillForm(['confirmation_name' => 'another-server'])->callMountedAction()
+            ->assertHasActionErrors(['confirmation_name' => 'in']);
+        $page->fillForm(['confirmation_name' => 'HAPPY-GROVE'])->callMountedAction()
+            ->assertHasActionErrors(['confirmation_name' => 'in']);
+
+        Http::assertNothingSent();
+        $this->assertSame('running', $server->fresh()->hetzner_status);
+    }
+
+    public function test_vm_deletion_dialog_rechecks_the_name_after_the_server_is_renamed(): void
+    {
+        $this->adminPanel(User::factory()->globalAdmin()->create());
+        $server = LuantiServer::factory()->hetznerVm()->create(['name' => 'happy-grove']);
+        Http::preventStrayRequests();
+        $page = Livewire::test(LuantiServers::class)->mountAction(TestAction::make('deleteVm')->table($server));
+        $server->update(['name' => 'renamed-server']);
+
+        $page->fillForm(['confirmation_name' => 'happy-grove'])->callMountedAction()
+            ->assertHasActionErrors(['confirmation_name']);
+
+        Http::assertNothingSent();
     }
 
     public function test_missing_token_shows_actionable_notification_without_saving_a_vm(): void

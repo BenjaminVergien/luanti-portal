@@ -115,6 +115,27 @@ class PortalWorldTemplatesTest extends TestCase
         $this->assertSame($oldDigest, $copy->bundle_sha256);
     }
 
+    public function test_vm_deletion_preserves_the_portal_library_and_its_private_template_zip(): void
+    {
+        config(['services.hetzner.token' => 'project-secret']);
+        $actor = User::factory()->globalAdmin()->create();
+        $library = app(PortalWorldTemplates::class);
+        $archive = $this->archive();
+        $template = $library->import($actor, $archive);
+        $server = LuantiServer::factory()->hetznerVm()->create();
+        $library->registerCommissioned($server, $library->snapshot());
+        Http::fake(['https://api.hetzner.cloud/v1/servers/42' => Http::response([], 404)]);
+
+        app(HetznerVirtualMachines::class)->delete($actor, $server, $server->name);
+
+        $this->assertSame('deleted', $server->fresh()->hetzner_status);
+        $this->assertFalse($server->templates()->sole()->is_available);
+        $this->assertTrue($template->fresh()->is_available);
+        $this->assertFileEquals($archive, $library->artifact($template->bundle_sha256));
+        $this->assertCount(1, $library->snapshot());
+        Http::assertSentCount(1);
+    }
+
     #[DataProvider('invalidBundles')]
     public function test_import_rejects_unsafe_or_modified_bundles(array $extra, bool $badRevision): void
     {

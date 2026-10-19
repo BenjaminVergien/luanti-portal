@@ -3,12 +3,13 @@
 namespace Tests\Feature;
 
 use App\Jobs\ProvisionLuantiBridge;
-use App\Models\LuantiGameInstance;
 use App\Models\LuantiServer;
 use App\Models\LuantiWorldTemplate;
 use App\Models\User;
+use App\Models\WorldRequest;
 use App\Services\BridgeProvisioning;
 use App\Services\HetznerVirtualMachines;
+use App\Services\LuantiGameInstances;
 use App\Services\LuantiServerRegistry;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -295,13 +296,13 @@ class HetznerVirtualMachinesTest extends TestCase
         ]);
         $service = app(HetznerVirtualMachines::class);
 
-        $service->delete($admin, $server);
+        $service->delete($admin, $server, $server->name);
 
         $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'hetzner_status' => 'deleting']);
         Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE' && $request->url() === 'https://api.hetzner.cloud/v1/servers/42');
 
         $service->refresh($admin, $server);
-        $service->delete($admin, $server);
+        $service->delete($admin, $server, $server->name);
 
         $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'hetzner_status' => 'deleted', 'api_token' => null]);
         Http::assertSentCount(3);
@@ -330,7 +331,7 @@ class HetznerVirtualMachinesTest extends TestCase
         Http::fake(['https://api.hetzner.cloud/v1/servers/42' => Http::response(['server' => $remote])]);
 
         try {
-            app(HetznerVirtualMachines::class)->delete($admin, $server);
+            app(HetznerVirtualMachines::class)->delete($admin, $server, $server->name);
             $this->fail('Unrelated VM could be deleted.');
         } catch (ValidationException $exception) {
             $this->assertArrayHasKey('hetzner', $exception->errors());
@@ -341,47 +342,81 @@ class HetznerVirtualMachinesTest extends TestCase
         $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'hetzner_status' => 'running']);
     }
 
-    public function test_vm_deletion_is_blocked_when_world_templates_or_game_instances_exist(): void
+    public function test_confirmed_vm_deletion_allows_templates_and_game_worlds_and_retains_their_history(): void
     {
         $admin = User::factory()->globalAdmin()->create();
         $server = LuantiServer::factory()->hetznerVm()->create();
         $template = LuantiWorldTemplate::factory()->for($server, 'server')->create();
+        $request = WorldRequest::factory()->approved()->create(['luanti_world_template_id' => $template->id]);
+        $instance = $request->currentGameInstance;
+        $unrelated = LuantiWorldTemplate::factory()->create();
+        Http::preventStrayRequests();
+        Http::fake(['https://api.hetzner.cloud/v1/servers/42' => Http::sequence()
+            ->push(['server' => $this->remoteServer($server)])
+            ->push(['action' => ['status' => 'running']])->push([], 404)]);
+
+        $service = app(HetznerVirtualMachines::class);
+        $service->delete($admin, $server, $server->name);
+
+        $this->assertFalse($template->fresh()->is_available);
+        $this->assertTrue($unrelated->fresh()->is_available);
+        $this->assertSame('running', $instance->fresh()->state);
+        $service->refresh($admin, $server);
+
+        $this->assertSame('deleted', $server->fresh()->hetzner_status);
+        $this->assertSame('failed', $instance->fresh()->state);
+        $this->assertFalse($instance->fresh()->is_prepared);
+        $this->assertTrue($instance->fresh()->is_archived);
+        $this->assertStringContainsString('Weltdaten und Spielfortschritte', $instance->fresh()->error);
+        $this->assertModelExists($template);
+        $this->assertModelExists($instance->worldRequest);
+        $this->assertModelExists($server);
+        app(LuantiGameInstances::class)->reconcile($request->id);
+        $this->assertSame(0, $instance->lifecycleJobs()->count());
+        Http::assertSentCount(3);
+    }
+
+    public function test_vm_deletion_requires_the_current_exact_server_name_before_any_api_request(): void
+    {
+        $admin = User::factory()->globalAdmin()->create();
+        $server = LuantiServer::factory()->hetznerVm()->create(['name' => 'happy-grove']);
         Http::preventStrayRequests();
 
-        try {
-            app(HetznerVirtualMachines::class)->delete($admin, $server);
-            $this->fail('VM containing templates could be deleted.');
-        } catch (ValidationException $exception) {
-            $this->assertArrayHasKey('hetzner', $exception->errors());
-        }
-
-        $template->delete();
-        LuantiGameInstance::factory()->create(['luanti_server_id' => $server->id]);
-        try {
-            app(HetznerVirtualMachines::class)->delete($admin, $server);
-            $this->fail('VM containing game instances could be deleted.');
-        } catch (ValidationException $exception) {
-            $this->assertArrayHasKey('hetzner', $exception->errors());
+        foreach ([null, '', 'wrong-server', 'HAPPY-GROVE', 'happy-grove'] as $confirmationName) {
+            if ($confirmationName === 'happy-grove') {
+                $server->fresh()->update(['name' => 'renamed-server']);
+            }
+            try {
+                app(HetznerVirtualMachines::class)->delete($admin, $server, $confirmationName);
+                $this->fail('Missing, wrong or stale confirmation allowed deletion.');
+            } catch (ValidationException $exception) {
+                $this->assertArrayHasKey('confirmation_name', $exception->errors());
+            }
         }
 
         Http::assertNothingSent();
-        $this->assertModelExists($server);
+        $this->assertSame('running', $server->fresh()->hetzner_status);
     }
 
     public function test_protected_vm_deletion_error_keeps_vm_record_and_sanitizes_response(): void
     {
         $admin = User::factory()->globalAdmin()->create();
         $server = LuantiServer::factory()->hetznerVm()->create();
+        $template = LuantiWorldTemplate::factory()->for($server, 'server')->create();
+        $request = WorldRequest::factory()->approved()->create(['luanti_world_template_id' => $template->id]);
         Http::preventStrayRequests();
         Http::fake(['https://api.hetzner.cloud/v1/servers/42' => Http::sequence()
             ->push(['server' => $this->remoteServer($server)])
             ->push(['error' => ['message' => 'private-details']], 423)]);
 
-        app(HetznerVirtualMachines::class)->delete($admin, $server);
+        app(HetznerVirtualMachines::class)->delete($admin, $server, $server->name);
 
         $this->assertDatabaseHas('luanti_servers', ['id' => $server->id, 'hetzner_status' => 'running']);
         $this->assertStringNotContainsString('private-details', $server->fresh()->toJson());
         $this->assertNotNull($server->fresh()->hetzner_error);
+        $this->assertTrue($template->fresh()->is_available);
+        $this->assertSame('running', $request->currentGameInstance->fresh()->state);
+        $this->assertFalse($request->currentGameInstance->fresh()->is_archived);
         Http::assertSentCount(2);
     }
 
@@ -393,7 +428,7 @@ class HetznerVirtualMachinesTest extends TestCase
         Http::fake(['https://api.hetzner.cloud/v1/servers/42' => fn (Request $request) => $request->method() === 'DELETE'
             ? Http::failedConnection() : Http::response(['server' => $this->remoteServer($server)])]);
 
-        app(HetznerVirtualMachines::class)->delete($admin, $server);
+        app(HetznerVirtualMachines::class)->delete($admin, $server, $server->name);
 
         $this->assertModelExists($server);
         $this->assertNotNull($server->fresh()->hetzner_error);
@@ -409,7 +444,7 @@ class HetznerVirtualMachinesTest extends TestCase
         Http::preventStrayRequests();
 
         try {
-            app(HetznerVirtualMachines::class)->delete($admin, $server);
+            app(HetznerVirtualMachines::class)->delete($admin, $server, $server->name);
             $this->fail('Concurrent VM operation was accepted.');
         } catch (ValidationException $exception) {
             $this->assertArrayHasKey('hetzner', $exception->errors());
@@ -444,7 +479,7 @@ class HetznerVirtualMachinesTest extends TestCase
         $service = app(HetznerVirtualMachines::class);
         Http::preventStrayRequests();
 
-        foreach ([fn () => $service->create($actor, $this->vmData()), fn () => $service->refresh($actor, $server), fn () => $service->delete($actor, $server)] as $operation) {
+        foreach ([fn () => $service->create($actor, $this->vmData()), fn () => $service->refresh($actor, $server), fn () => $service->delete($actor, $server, $server->name)] as $operation) {
             try {
                 $operation();
                 $this->fail('Unauthorized cloud operation was accepted.');

@@ -183,19 +183,22 @@ class HetznerVirtualMachines
         });
     }
 
-    public function delete(User $actor, LuantiServer $server): LuantiServer
+    public function delete(User $actor, LuantiServer $server, ?string $confirmationName = null): LuantiServer
     {
         $this->authorize($actor, $server, 'delete');
 
-        return $this->withLock((string) $server->id, function () use ($actor, $server): LuantiServer {
-            return DB::transaction(function () use ($actor, $server): LuantiServer {
+        return $this->withLock((string) $server->id, function () use ($actor, $server, $confirmationName): LuantiServer {
+            return DB::transaction(function () use ($actor, $server, $confirmationName): LuantiServer {
                 $server = LuantiServer::query()->whereKey($server->id)->lockForUpdate()->firstOrFail();
                 $this->authorize($actor, $server, 'delete');
+                Validator::make(['confirmation_name' => $confirmationName], [
+                    'confirmation_name' => ['required', 'string', Rule::in([$server->name])],
+                ], [
+                    'confirmation_name.required' => 'Bitte den Servernamen zur Bestätigung eingeben.',
+                    'confirmation_name.in' => 'Der Servername stimmt nicht überein. Bitte den Namen exakt eingeben.',
+                ])->validate();
                 if ($server->hetzner_status === 'deleted') {
                     return $server;
-                }
-                if ($server->templates()->exists() || $server->gameInstances()->exists()) {
-                    throw ValidationException::withMessages(['hetzner' => 'Diese VM enthält Weltvorlagen oder Spielinstanzen und kann nicht gelöscht werden.']);
                 }
                 if (in_array($server->hetzner_status, ['key_pending', 'create_failed'], true)) {
                     return $this->finishDeletion($server);
@@ -218,6 +221,7 @@ class HetznerVirtualMachines
                     return $this->saveError($server, $this->apiError($response));
                 }
                 $server->forceFill(['hetzner_status' => 'deleting', 'hetzner_error' => null])->save();
+                $server->templates()->update(['is_available' => false]);
 
                 return $server;
             });
@@ -309,6 +313,11 @@ class HetznerVirtualMachines
     private function finishDeletion(LuantiServer $server): LuantiServer
     {
         $this->provisioningKey->removeRegisteredKey($server);
+        $server->templates()->update(['is_available' => false]);
+        $server->gameInstances()->update([
+            'state' => 'failed', 'is_prepared' => false, 'is_archived' => true,
+            'error' => 'Die Hetzner-VM wurde gelöscht. Die Weltdaten und Spielfortschritte auf dieser VM wurden entfernt. Eine Archivkopie wurde dabei nicht erstellt.',
+        ]);
         $server->forceFill([
             'dns_cleanup_pending' => $server->public_https_configuration !== null && $server->dns_status !== 'deleted',
             'https_status' => $server->public_https_configuration === null ? null : 'deleted',

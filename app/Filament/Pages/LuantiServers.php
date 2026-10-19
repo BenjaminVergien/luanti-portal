@@ -30,6 +30,7 @@ use Filament\Tables\Table;
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 class LuantiServers extends AccessTablePage
@@ -186,11 +187,19 @@ class LuantiServers extends AccessTablePage
                     }),
                 Action::make('deleteVm')->label('Hetzner-VM löschen')->color('danger')->requiresConfirmation()
                     ->modalHeading('Hetzner-VM unwiderruflich löschen?')
-                    ->modalDescription('Löscht die VM und ihre lokale Festplatte bei Hetzner. Alle Daten auf der VM gehen verloren. Der Portaleintrag bleibt zur Statusprüfung erhalten.')
+                    ->modalDescription('Löscht die VM und ihre lokale Festplatte bei Hetzner unwiderruflich, einschließlich aller Spielwelten, Spielaccounts und Spielfortschritte. Es wird keine Sicherung erstellt. Vorlagen-ZIPs in der Portalbibliothek bleiben erhalten. Der Portaleintrag und die bisherige Historie bleiben erhalten.')
+                    ->schema([
+                        TextInput::make('confirmation_name')->label('Servername zur Bestätigung')
+                            ->helperText(fn (LuantiServer $record): string => 'Zum Löschen exakt „'.$record->name.'“ eingeben.')
+                            ->required()->maxLength(255)->rules(fn (LuantiServer $record): array => [Rule::in([$record->name])])
+                            ->validationMessages(['required' => 'Bitte den Servernamen zur Bestätigung eingeben.',
+                                'in' => 'Der Servername stimmt nicht überein. Bitte den Namen exakt eingeben.']),
+                    ])
+                    ->modalSubmitActionLabel('VM und Weltdaten unwiderruflich löschen')
                     ->visible(fn (LuantiServer $record): bool => $record->hetzner_reference !== null
                         && $record->hetzner_status !== 'deleted')
-                    ->action(function (LuantiServer $record): void {
-                        $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->delete($this->actor(), $record));
+                    ->action(function (LuantiServer $record, array $data): void {
+                        $this->performVmAction(fn (): LuantiServer => app(HetznerVirtualMachines::class)->delete($this->actor(), $record, $data['confirmation_name']));
                     }),
                 Action::make('checkConnection')->label('API-Verbindung prüfen')
                     ->action(function (LuantiServer $record): void {
