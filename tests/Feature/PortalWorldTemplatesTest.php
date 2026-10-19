@@ -12,6 +12,7 @@ use App\Services\BridgeProvisioning;
 use App\Services\GithubBridgeSource;
 use App\Services\HetznerVirtualMachines;
 use App\Services\LuantiImageCatalog;
+use App\Services\LuantiServerRegistry;
 use App\Services\LuantiSshClient;
 use App\Services\LuantiWorldTemplateRegistry;
 use App\Services\PortalSettings;
@@ -129,7 +130,11 @@ class PortalWorldTemplatesTest extends TestCase
         app(HetznerVirtualMachines::class)->delete($actor, $server, $server->name);
 
         $this->assertSame('deleted', $server->fresh()->hetzner_status);
-        $this->assertFalse($server->templates()->sole()->is_available);
+        $copy = $server->templates()->sole();
+        $this->assertFalse($copy->is_available);
+        app(LuantiServerRegistry::class)->delete($actor, $server);
+        $this->assertModelMissing($server);
+        $this->assertModelMissing($copy);
         $this->assertTrue($template->fresh()->is_available);
         $this->assertFileEquals($archive, $library->artifact($template->bundle_sha256));
         $this->assertCount(1, $library->snapshot());

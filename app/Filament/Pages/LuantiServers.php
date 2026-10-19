@@ -220,7 +220,7 @@ class LuantiServers extends AccessTablePage
                         $this->saved('API-Token entfernt');
                     }),
                 Action::make('delete')->label('Löschen')->color('danger')->requiresConfirmation()
-                    ->modalHeading('Server löschen?')->modalDescription('Der Servereintrag und seine gespeicherten Zugangsdaten werden aus dem Portal entfernt.')
+                    ->modalHeading('Server löschen?')->modalDescription('Entfernt den Server aus der Serverliste und bereinigt ungenutzte Vorlagenkopien. Bestehende Anträge und Spielhistorie sowie Vorlagen-ZIPs der Portal-Bibliothek bleiben erhalten.')
                     ->visible(fn (LuantiServer $record): bool => ! $record->dns_cleanup_pending && ($record->hetzner_reference === null
                         || (in_array($record->hetzner_status, ['deleted', 'create_failed'], true)
                             && $record->getRawOriginal('provisioning_private_key') === null)))

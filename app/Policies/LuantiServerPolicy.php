@@ -24,11 +24,11 @@ class LuantiServerPolicy
 
     public function update(User $user, LuantiServer $luantiServer): bool
     {
-        return $this->viewAny($user);
+        return $this->viewAny($user) && ! $luantiServer->trashed();
     }
 
     public function delete(User $user, LuantiServer $luantiServer): bool
     {
-        return $this->viewAny($user);
+        return $this->viewAny($user) && ! $luantiServer->trashed();
     }
 }

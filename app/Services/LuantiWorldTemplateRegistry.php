@@ -21,7 +21,9 @@ class LuantiWorldTemplateRegistry
     {
         Gate::forUser($this->access->currentUser($actor))->authorize('viewAny', LuantiWorldTemplate::class);
 
-        return LuantiWorldTemplate::query()->with('server');
+        return LuantiWorldTemplate::query()->with('server')
+            ->where(fn (Builder $query): Builder => $query->whereNull('luanti_server_id')
+                ->orWhereHas('server', fn (Builder $server): Builder => $server->whereNull('deleted_at')));
     }
 
     /** @param array{luanti_server_id?: mixed, name?: mixed, template_identifier?: mixed, is_selectable?: mixed} $data */

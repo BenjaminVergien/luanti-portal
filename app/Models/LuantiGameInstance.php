@@ -32,7 +32,7 @@ class LuantiGameInstance extends Model
 
     public function server(): BelongsTo
     {
-        return $this->belongsTo(LuantiServer::class, 'luanti_server_id');
+        return $this->belongsTo(LuantiServer::class, 'luanti_server_id')->withTrashed();
     }
 
     public function lifecycleJobs(): HasMany

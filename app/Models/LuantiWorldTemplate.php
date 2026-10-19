@@ -22,11 +22,16 @@ class LuantiWorldTemplate extends Model
 
     public function server(): BelongsTo
     {
-        return $this->belongsTo(LuantiServer::class, 'luanti_server_id');
+        return $this->belongsTo(LuantiServer::class, 'luanti_server_id')->withTrashed();
     }
 
     public function worldRequests(): HasMany
     {
         return $this->hasMany(WorldRequest::class);
+    }
+
+    public function gameInstances(): HasMany
+    {
+        return $this->hasMany(LuantiGameInstance::class);
     }
 }

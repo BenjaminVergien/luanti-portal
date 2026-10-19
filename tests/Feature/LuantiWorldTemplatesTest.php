@@ -17,6 +17,7 @@ use Filament\Facades\Filament;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
@@ -112,6 +113,72 @@ class LuantiWorldTemplatesTest extends TestCase
         $request = WorldRequest::factory()->create();
         $this->expectException(QueryException::class);
         $request->world->delete();
+    }
+
+    public function test_final_cloud_server_cleanup_removes_unused_template_copies_and_the_server_from_the_list(): void
+    {
+        $admin = User::factory()->globalAdmin()->create();
+        $this->panel($admin);
+        $server = LuantiServer::factory()->hetznerVm()->create(['hetzner_status' => 'deleted']);
+        $copy = LuantiWorldTemplate::factory()->for($server, 'server')->create(['is_available' => false]);
+        $other = LuantiWorldTemplate::factory()->create();
+        Http::preventStrayRequests();
+
+        Livewire::test(LuantiServers::class)->callAction(TestAction::make('delete')->table($server))
+            ->assertHasNoActionErrors()->assertNotified('Server gelöscht')->assertCanNotSeeTableRecords([$server]);
+
+        $this->assertModelMissing($server);
+        $this->assertModelMissing($copy);
+        $this->assertModelExists($other);
+        $this->assertModelExists($other->server);
+        Http::assertNothingSent();
+    }
+
+    public function test_final_cleanup_hides_a_deleted_server_and_preserves_request_and_game_history(): void
+    {
+        $admin = User::factory()->globalAdmin()->create();
+        $this->panel($admin);
+        $server = LuantiServer::factory()->hetznerVm()->create(['hetzner_status' => 'deleted']);
+        $template = LuantiWorldTemplate::factory()->for($server, 'server')->create(['is_available' => false]);
+        $request = WorldRequest::factory()->approved()->create(['luanti_world_template_id' => $template->id]);
+        $instance = $request->currentGameInstance;
+        $instance->update(['state' => 'failed', 'is_prepared' => false, 'is_archived' => true]);
+        $unused = LuantiWorldTemplate::factory()->for($server, 'server')->create();
+        Http::preventStrayRequests();
+
+        Livewire::test(LuantiServers::class)->callAction(TestAction::make('delete')->table($server))
+            ->assertHasNoActionErrors()->assertNotified('Server gelöscht')->assertCanNotSeeTableRecords([$server]);
+
+        $this->assertSoftDeleted($server);
+        $this->assertNull(LuantiServer::query()->find($server->id));
+        $this->assertSame($server->id, $request->fresh()->world->server->id);
+        $this->assertSame($server->id, $instance->fresh()->server->id);
+        $this->assertSame($template->id, $instance->fresh()->template->id);
+        $this->assertFalse($template->fresh()->is_available);
+        $this->assertModelMissing($unused);
+        $this->assertModelExists($request);
+        $this->assertModelExists($instance);
+        $this->assertFalse(Gate::forUser($admin)->allows('update', $instance->fresh()->server));
+        Livewire::test(LuantiWorldTemplates::class)->assertCanNotSeeTableRecords([$template]);
+        Http::assertNothingSent();
+    }
+
+    public function test_cleanup_preserves_old_templates_still_referenced_by_game_instances_after_a_template_change(): void
+    {
+        $admin = User::factory()->globalAdmin()->create();
+        $server = LuantiServer::factory()->hetznerVm()->create(['hetzner_status' => 'deleted']);
+        $old = LuantiWorldTemplate::factory()->for($server, 'server')->create(['is_available' => false]);
+        $new = LuantiWorldTemplate::factory()->for($server, 'server')->create(['is_available' => false]);
+        $request = WorldRequest::factory()->approved()->create(['luanti_world_template_id' => $old->id]);
+        $request->update(['luanti_world_template_id' => $new->id]);
+
+        app(LuantiServerRegistry::class)->delete($admin, $server);
+
+        $this->assertSoftDeleted($server);
+        $this->assertModelExists($old);
+        $this->assertModelExists($new);
+        $this->assertSame($old->id, $request->fresh()->currentGameInstance->template->id);
+        $this->assertSame($new->id, $request->fresh()->world->id);
     }
 
     public function test_optional_example_seeders_are_idempotent_and_never_run_in_production(): void

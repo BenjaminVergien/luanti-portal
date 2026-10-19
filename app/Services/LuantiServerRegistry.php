@@ -71,10 +71,19 @@ class LuantiServerRegistry
                 || $server->getRawOriginal('provisioning_private_key') !== null)) {
                 throw ValidationException::withMessages(['server' => 'Bitte zuerst die Hetzner-VM löschen und ihren Status aktualisieren.']);
             }
+            if ($server->hetzner_reference !== null) {
+                $server->templates()->update(['is_available' => false]);
+                $server->templates()->whereDoesntHave('worldRequests')->whereDoesntHave('gameInstances')->delete();
+                if ($server->templates()->exists() || $server->gameInstances()->exists()) {
+                    $server->delete();
+
+                    return;
+                }
+            }
             if ($server->templates()->exists() || $server->gameInstances()->exists()) {
                 throw ValidationException::withMessages(['server' => 'Dieser Server enthält Katalogwelten und kann nicht gelöscht werden.']);
             }
-            $server->delete();
+            $server->forceDelete();
         });
     }
 
