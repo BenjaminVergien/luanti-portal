@@ -9,6 +9,10 @@
                 <p><strong>Zuletzt genehmigter Stand:</strong> {{ $approvedWorld->label() }} / {{ $approvedWorld->server->name }}, {{ $approvedWindow }}.</p>
             @endif
             <p>Spielaccounts gelten nur für die private Spielinstanz. Archivierte Spielstände bleiben erhalten und sind nicht spielbar. Vorlagen enthalten keine Spielaccounts.</p>
+            @if ($worldRequest->facilitatorAccount)
+                <p><strong>Automatisch vorbereiteter Fachkraft-Spielaccount:</strong> {{ $worldRequest->facilitatorAccount->username }}.
+                    Das Startpasswort kannst du unten beim Spielaccount anzeigen lassen.</p>
+            @endif
             @foreach ($worldRequest->gameInstances as $instance)
                 <p><strong>{{ $instance->label() }}</strong>
                     @if ($instance->error)<br>{{ $instance->error }}@endif

@@ -438,6 +438,7 @@ class LuantiAccounts
                 'result' => ['version' => 2, 'job_id' => $job->job_id, 'status' => $result['status'], 'accounts' => $safeResults,
                     'superseded' => $job->generation !== ($request->approved_access['generation'] ?? null)]]);
         });
+        app(WorldRequestMailings::class)->queueReadyIfEnterable($job->world_request_id);
     }
 
     private function safeCode(mixed $code): string

@@ -6,6 +6,7 @@ use App\Jobs\ProvisionLuantiBridge;
 use App\Jobs\ProvisionWorldRequest;
 use App\Models\LuantiServer;
 use App\Models\WorldRequest;
+use App\Services\WorldRequestMailings;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -16,8 +17,11 @@ Schedule::command('luanti:games:reconcile')->everyMinute()->withoutOverlapping()
 Schedule::call(function (): void {
     WorldRequest::query()->where('status', WorldRequestStatus::Approved)->whereNull('approved_access')
         ->whereNotNull('provisioning_configuration')->whereNull('provisioning_error')
+        ->where(fn (Builder $query): Builder => $query->whereNull('provisioning_starts_at')->orWhere('provisioning_starts_at', '<=', now()))
         ->each(fn (WorldRequest $request) => ProvisionWorldRequest::dispatch($request->id));
 })->name('world-request-provisioning-recovery')->everyMinute()->withoutOverlapping();
+Schedule::call(fn () => app(WorldRequestMailings::class)->recover())
+    ->name('world-request-mail-recovery')->everyMinute()->withoutOverlapping();
 Schedule::call(function (): void {
     LuantiServer::query()->whereIn('bridge_status', ['pending', 'installing'])
         ->whereNotIn('hetzner_status', ['deleted', 'deleting', 'create_failed', 'key_pending'])

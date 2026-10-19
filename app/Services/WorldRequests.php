@@ -9,6 +9,7 @@ use App\Models\LuantiWorldTemplate;
 use App\Models\Organization;
 use App\Models\User;
 use App\Models\WorldRequest;
+use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Cache;
@@ -49,6 +50,16 @@ class WorldRequests
                 $world->id => $world->name.($world->server === null ? '' : ' ('.$world->server->name.')')
                     .($world->is_selectable && $world->is_available ? '' : ' – Nicht mehr beantragbar'),
             ])->all();
+    }
+
+    /** @return array<int, string> */
+    public function worldDescriptions(User $actor, ?Organization $organization = null, ?WorldRequest $request = null): array
+    {
+        $options = $this->worldOptions($actor, $organization, $request);
+
+        return LuantiWorldTemplate::query()->whereKey(array_keys($options))->get()->mapWithKeys(fn (LuantiWorldTemplate $template): array => [
+            $template->id => filled($template->description) ? $template->description : 'Für diese Vorlage wurde noch keine Beschreibung hinterlegt.',
+        ])->all();
     }
 
     /** @param array{name?: mixed, luanti_world_template_id?: mixed, start_date?: mixed, end_date?: mixed, participant_count?: mixed} $data */
@@ -137,6 +148,10 @@ class WorldRequests
                         }
                         $request->forceFill(['status' => $approve ? WorldRequestStatus::Approved : WorldRequestStatus::Rejected,
                             'decided_by' => $actor->id, 'decided_at' => now(), 'revision' => $request->revision + 1])->save();
+                        if ($approve) {
+                            $request->forceFill(['approval_mail_revision' => $request->revision])->save();
+                            app(WorldRequestMailings::class)->queueApproval($request);
+                        }
                         if ($request->approved_access !== null) {
                             app(LuantiAccounts::class)->cancelSupersededUnsentJobs($request);
                         }
@@ -170,7 +185,15 @@ class WorldRequests
                 'decided_by' => $actor->id, 'decided_at' => now(), 'revision' => $request->revision + 1,
                 'provisioning_configuration' => $configuration, 'provisioning_error' => null])->save();
             if ($approve) {
-                ProvisionWorldRequest::dispatch($request->id)->afterCommit();
+                $starts = CarbonImmutable::parse($request->start_date->toDateString(), 'Europe/Berlin')->startOfDay()->setTimezone(config('app.timezone'));
+                if (CarbonImmutable::parse($request->end_date->toDateString(), 'Europe/Berlin')->addDay()->startOfDay()->lessThanOrEqualTo(now())) {
+                    throw ValidationException::withMessages(['end_date' => 'Der beantragte Zeitraum ist bereits abgelaufen. Bitte den Antrag zuerst aktualisieren.']);
+                }
+                $request->forceFill(['provisioning_starts_at' => $starts, 'approval_mail_revision' => $request->revision])->save();
+                app(WorldRequestMailings::class)->queueApproval($request);
+                if ($starts->lessThanOrEqualTo(now())) {
+                    ProvisionWorldRequest::dispatch($request->id)->afterCommit();
+                }
             }
         });
     }
@@ -216,7 +239,7 @@ class WorldRequests
         }
     }
 
-    /** @return array{template_id: string, name: string, revision: string, bundle_sha256: string}|null */
+    /** @return array{template_id: string, name: string, description: string|null, revision: string, bundle_sha256: string}|null */
     private function templateSnapshot(int|string $worldId): ?array
     {
         $template = LuantiWorldTemplate::query()->findOrFail($worldId);
@@ -225,7 +248,7 @@ class WorldRequests
         }
         app(PortalWorldTemplates::class)->artifact($template->bundle_sha256);
 
-        return ['template_id' => $template->template_identifier, 'name' => $template->name,
+        return ['template_id' => $template->template_identifier, 'name' => $template->name, 'description' => $template->description,
             'revision' => $template->revision, 'bundle_sha256' => $template->bundle_sha256];
     }
 

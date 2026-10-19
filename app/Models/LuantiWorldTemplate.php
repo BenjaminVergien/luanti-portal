@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['luanti_server_id', 'name', 'template_identifier', 'revision', 'is_selectable'])]
+#[Fillable(['luanti_server_id', 'name', 'description', 'template_identifier', 'revision', 'is_selectable'])]
 class LuantiWorldTemplate extends Model
 {
     /** @use HasFactory<LuantiWorldTemplateFactory> */

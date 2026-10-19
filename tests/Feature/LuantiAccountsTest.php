@@ -717,7 +717,8 @@ class LuantiAccountsTest extends TestCase
         });
         $this->reapprove($job->instance->luanti_world_template_id, '2026-10-22');
         $this->assertSame('cancelled', $job->fresh()->state);
-        $this->assertDatabaseCount('jobs', 0);
+        $this->assertSame(0, DB::table('jobs')->where('payload', 'like', '%ProcessLuantiAccounts%')->count());
+        $this->assertSame(1, DB::table('jobs')->where('payload', 'like', '%SendWorldRequestMail%')->count());
     }
 
     public function test_migration_preserves_legacy_active_jobs_as_potentially_submitted(): void

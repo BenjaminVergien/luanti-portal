@@ -26,7 +26,7 @@ class LuantiWorldTemplateRegistry
                 ->orWhereHas('server', fn (Builder $server): Builder => $server->whereNull('deleted_at')));
     }
 
-    /** @param array{luanti_server_id?: mixed, name?: mixed, template_identifier?: mixed, is_selectable?: mixed} $data */
+    /** @param array{luanti_server_id?: mixed, name?: mixed, description?: mixed, template_identifier?: mixed, is_selectable?: mixed} $data */
     public function update(User $actor, LuantiWorldTemplate $world, array $data): void
     {
         $world = $world->fresh();
@@ -50,30 +50,40 @@ class LuantiWorldTemplateRegistry
                 throw ValidationException::withMessages(['template_identifier' => 'Server und Kennung einer Weltvorlage können nicht geändert werden.']);
             }
             $world->update($attributes);
+            if ($world->library_identifier !== null && array_key_exists('description', $attributes)) {
+                LuantiWorldTemplate::query()->whereNotNull('luanti_server_id')
+                    ->where('template_identifier', $world->template_identifier)->where('revision', $world->revision)
+                    ->update(['description' => $attributes['description']]);
+            }
         });
     }
 
     /**
-     * @param  array{luanti_server_id?: mixed, name?: mixed, template_identifier?: mixed, is_selectable?: mixed}  $data
-     * @return array{luanti_server_id: int|string|null, name: string, template_identifier: string, is_selectable: bool|int|string}
+     * @param  array{luanti_server_id?: mixed, name?: mixed, description?: mixed, template_identifier?: mixed, is_selectable?: mixed}  $data
+     * @return array{luanti_server_id: int|string|null, name: string, description?: string|null, template_identifier: string, is_selectable: bool|int|string}
      */
     private function validate(array $data, ?LuantiWorldTemplate $world = null): array
     {
         if ($world?->library_identifier !== null) {
             $data = ['luanti_server_id' => null, ...$data];
         }
-        foreach (['name', 'template_identifier'] as $field) {
+        foreach (['name', 'template_identifier', 'description'] as $field) {
             if (is_string($data[$field] ?? null)) {
                 $data[$field] = trim($data[$field]);
             }
+        }
+        if (array_key_exists('description', $data) && $data['description'] === '') {
+            $data['description'] = null;
         }
 
         return Validator::make($data, [
             'luanti_server_id' => [$world?->library_identifier !== null ? 'nullable' : 'required', 'integer', Rule::exists('luanti_servers', 'id')],
             'name' => ['required', 'string', 'max:255'],
+            'description' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'template_identifier' => ['required', 'string', 'max:255', Rule::unique('luanti_world_templates')
                 ->where('luanti_server_id', $data['luanti_server_id'] ?? null)->ignore($world?->id)],
             'is_selectable' => ['required', 'boolean'],
-        ], [], ['luanti_server_id' => 'Server', 'name' => 'Name', 'template_identifier' => 'Weltkennung', 'is_selectable' => 'Beantragbar'])->validate();
+        ], ['description.max' => 'Die Beschreibung darf höchstens 5000 Zeichen enthalten.'],
+            ['luanti_server_id' => 'Server', 'name' => 'Name', 'description' => 'Beschreibung', 'template_identifier' => 'Weltkennung', 'is_selectable' => 'Beantragbar'])->validate();
     }
 }

@@ -11,6 +11,7 @@ use Filament\Actions\Action;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Schema;
@@ -49,6 +50,7 @@ class LuantiWorldTemplates extends AccessTablePage
     {
         return $table->query(fn () => app(LuantiWorldTemplateRegistry::class)->query($this->actor()))->columns([
             TextColumn::make('name')->label('Name')->searchable()->sortable(),
+            TextColumn::make('description')->label('Beschreibung')->limit(100)->wrap()->placeholder('Noch keine Beschreibung')->searchable(),
             TextColumn::make('server.name')->label('Server')->searchable()->sortable()->placeholder('Portal-Bibliothek'),
             TextColumn::make('template_identifier')->label('Vorlagenkennung')->searchable(),
             IconColumn::make('is_selectable')->label('Beantragbar')->boolean(),
@@ -59,7 +61,7 @@ class LuantiWorldTemplates extends AccessTablePage
                 ->placeholder(fn (LuantiWorldTemplate $record): string => $record->library_identifier !== null ? 'Im Portal gespeichert' : 'Manuell angelegt'),
         ])->recordActions([
             Action::make('edit')->label('Bearbeiten')
-                ->fillForm(fn (LuantiWorldTemplate $record): array => $record->only(['luanti_server_id', 'name', 'template_identifier', 'is_selectable']))
+                ->fillForm(fn (LuantiWorldTemplate $record): array => $record->only(['luanti_server_id', 'name', 'description', 'template_identifier', 'is_selectable']))
                 ->schema($this->worldFields())->action(function (LuantiWorldTemplate $record, array $data, Schema $schema): void {
                     $this->saveWorld($schema, fn () => app(LuantiWorldTemplateRegistry::class)->update($this->actor(), $record, $data), 'Gespeichert');
                 }),
@@ -81,7 +83,7 @@ class LuantiWorldTemplates extends AccessTablePage
         $this->saved($message);
     }
 
-    /** @return list<Select|TextInput|Toggle> */
+    /** @return list<Select|TextInput|Textarea|Toggle> */
     private function worldFields(): array
     {
         return [
@@ -89,6 +91,8 @@ class LuantiWorldTemplates extends AccessTablePage
                 ->options(fn (): array => LuantiServer::query()->orderBy('name')->pluck('name', 'id')->all())
                 ->disabled()->dehydrated(),
             TextInput::make('name')->label('Name')->required()->maxLength(255),
+            Textarea::make('description')->label('Beschreibung')->rows(6)->maxLength(5000)
+                ->helperText('Wird bei der Weltbeantragung angezeigt. Beschreibe Inhalt, Zielgruppe und mögliche Aktivitäten in dieser Welt.'),
             TextInput::make('template_identifier')->label('Vorlagenkennung')->required()->maxLength(255)
                 ->disabled()->dehydrated()
                 ->helperText('Kennung einer veröffentlichten Weltvorlage. Neue Server erhalten alle Portal-Vorlagen bei der Einrichtung.'),

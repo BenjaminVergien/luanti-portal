@@ -17,6 +17,7 @@ use Filament\Actions\Action;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Hidden;
+use Filament\Forms\Components\Radio;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
@@ -25,6 +26,7 @@ use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\HtmlString;
 use Illuminate\Validation\ValidationException;
 
 class WorldRequests extends AccessTablePage
@@ -81,7 +83,8 @@ class WorldRequests extends AccessTablePage
                 TextColumn::make('currentGameInstance.instance_identifier')->label('Spielinstanz')->placeholder('Noch nicht vorbereitet'),
                 TextColumn::make('instance_status')->label('Spielstatus')->state(fn (WorldRequest $record): string => $record->latestGameInstance()?->statusLabel()
                     ?? $record->currentGameInstance?->statusLabel() ?? ($record->provisioning_error !== null ? 'Bereitstellung fehlgeschlagen'
-                        : ($record->provisioning_configuration !== null ? 'Server wird bereitgestellt' : 'Wartet auf Genehmigung'))),
+                        : ($record->provisioning_starts_at?->isFuture() ? 'Geplant ab '.$record->provisioning_starts_at->setTimezone('Europe/Berlin')->format('d.m.Y H:i')
+                            : ($record->provisioning_configuration !== null ? 'Server wird bereitgestellt' : 'Wartet auf Genehmigung')))),
                 TextColumn::make('preparation_error')->label('Vorbereitung')->state(fn (WorldRequest $record): ?string => $record->provisioning_error
                     ?? $record->latestGameInstance()?->error ?? $record->currentGameInstance?->error)->wrap(),
                 TextColumn::make('start_date')->label('Startdatum')->date('d.m.Y')->sortable(),
@@ -165,7 +168,7 @@ class WorldRequests extends AccessTablePage
             ->visible(fn (WorldRequest $record): bool => $this->isInternalPanel() && Gate::forUser($this->actor())->allows('decide', $record)
                 && (! $approve || $record->world->luanti_server_id !== null || Gate::forUser($this->actor())->allows('create', LuantiServer::class)))
             ->modalDescription(fn (WorldRequest $record): string => $approve && $record->world->luanti_server_id === null
-                ? 'Mit der Genehmigung wird eine eigene kostenpflichtige Hetzner-VM für diesen Antrag erstellt. Luanti, Bridge und die angeforderte Welt werden automatisch eingerichtet. Die VM bleibt bis zur Löschung durch einen Administrator bestehen.'
+                ? 'Für diesen Antrag wird eine eigene kostenpflichtige Hetzner-VM erstellt: bei Beginn heute sofort, sonst am ersten Tag um 00:00 Uhr (Europe/Berlin). Die Einrichtung dauert einige Minuten. Die VM bleibt bis zur Löschung durch einen Administrator bestehen.'
                 : ($approve ? 'Gibt den beantragten Zeitraum frei.' : 'Lehnt diesen Weltantrag ab.'))
             ->fillForm(fn (WorldRequest $record): array => ['revision' => $record->revision])
             ->schema([Hidden::make('revision')->required()->rules(['integer', 'min:1']),
@@ -204,15 +207,19 @@ class WorldRequests extends AccessTablePage
         $this->saved($message);
     }
 
-    /** @return list<TextInput|Select|DatePicker|Hidden> */
+    /** @return list<TextInput|Radio|DatePicker|Hidden> */
     private function requestFields(bool $editing = false): array
     {
         return [
             TextInput::make('name')->label('Name')->required()->maxLength(255),
-            Select::make('luanti_world_template_id')->label('Weltvorlage')->required()->searchable()
+            Radio::make('luanti_world_template_id')->label('Weltvorlage')->required()
                 ->helperText('Wähle eine Vorlage aus der Portal-Bibliothek. Nach der Genehmigung wird dein eigener Spielserver eingerichtet.')
                 ->disabled(fn (?WorldRequest $record): bool => $record?->current_game_instance_id !== null)->dehydrated()
-                ->options(fn (?WorldRequest $record): array => app(WorldRequestService::class)->worldOptions($this->actor(), $this->requestOrganization(), $record)),
+                ->options(fn (?WorldRequest $record): array => app(WorldRequestService::class)->worldOptions($this->actor(), $this->requestOrganization(), $record))
+                ->descriptions(fn (?WorldRequest $record): array => array_map(
+                    fn (string $description): HtmlString => new HtmlString(nl2br(e($description))),
+                    app(WorldRequestService::class)->worldDescriptions($this->actor(), $this->requestOrganization(), $record),
+                )),
             DatePicker::make('start_date')->label('Startdatum')->required()->native()->displayFormat('d.m.Y')->format('Y-m-d'),
             DatePicker::make('end_date')->label('Enddatum')->required()->native()->displayFormat('d.m.Y')->format('Y-m-d')->afterOrEqual('start_date'),
             TextInput::make('participant_count')->label('Teilnehmendenzahl')->required()->integer()->minValue(1)->maxValue(4294967295)

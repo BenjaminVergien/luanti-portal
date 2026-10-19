@@ -536,13 +536,31 @@ multiple copies of this schedule or use the local `dev.ps1` stack in production.
 ## 6. Hosted acceptance checklist
 
 Import the published world ZIPs in **Luanti-Weltvorlagen** before onboarding.
+Use **Bearbeiten** to add a description of the content, target group and possible
+activities. Educators see the descriptions alongside the template choices in
+the request form. Descriptions are retained when importing a ZIP again.
 Educators request a template from the portal library without needing an existing
 game server. A global administrator approves the request and confirms the paid
 VM configuration (defaults: `cx23`, `nbg1`, Ubuntu 24.04). Luanti image, bridge,
 GitHub access, game source and Hetzner access must be configured beforehand.
-The queue creates one VM per approved library request; the minute scheduler
+The queue creates one VM per approved library request. For a start date of today
+or earlier, approval starts provisioning immediately, provided the requested
+period has not ended. Future requests start at 00:00 on their first day in
+`Europe/Berlin` (including daylight-saving changes); the minute scheduler picks
+them up within its next run. Setup takes additional minutes. The scheduler also
 recovers provisioning and connects the confirmed template to its private game
 instance. The requested template revision is retained even if the library changes.
+Approval queues a German confirmation email to the applicant. An automatic
+facilitator game account is created once; its encrypted initial password can be
+revealed by authorized users under **Spielaccounts** in the portal. A second email
+is queued only after the world is running within its approved window and the
+bridge has confirmed that account's admission. Credentials are never emailed.
+Status mail submissions are tracked in `world_request_mails`; accepted submissions
+are skipped on retries. Failed submissions are retried up to five times, with
+minute recovery for lost jobs. `accepted_at` means SMTP acceptance, not inbox
+delivery. After fixing a persistent mail problem, inspect the affected row and
+failed job before resetting its attempts for a controlled retry; do not resend
+rows already accepted by SMTP. An uncertain SMTP response can cause a duplicate.
 Caseworkers can review and reject requests; paid VM approval requires a global
 administrator. The approved game window stops the game, but the VM remains
 billable until an administrator deletes it.
@@ -579,9 +597,12 @@ Do not invite the interested parties until this checklist passes.
   Verify the HTTPS API connection and actual game host/UDP port separately.
 - [ ] Request a library template as an educator/manager without an existing game
   server. Approve it as a global administrator, check the paid VM confirmation,
-  and wait for automatic server provisioning and a running private instance;
-  create participant/facilitator game accounts, wait for confirmed transmission,
-  and log in through a real Luanti client with both roles.
+  and receive the approval email. Check that today's (or a still-current, earlier)
+  start provisions immediately, while a future start waits until 00:00 Berlin.
+  Wait for a running private instance and the readiness email. Retrieve the
+  automatic facilitator account and password in the portal, create a participant
+  account, wait for confirmed transmission, and join with both roles. Neither
+  status email may contain game credentials.
 - [ ] Verify out-of-window access is denied and a stopped game's save remains.
 - [ ] On a disposable test VM, verify that deletion requires the exact server
   name and warns about losing game worlds and player progress. Wait for confirmed

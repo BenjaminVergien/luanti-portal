@@ -203,13 +203,63 @@ class PortalWorldTemplatesTest extends TestCase
         $page = Livewire::test(LuantiWorldTemplates::class)->callAction('import', ['bundle' => $upload])
             ->assertHasNoActionErrors()->assertNotified('Vorlage im Portal gespeichert');
         $template = LuantiWorldTemplate::query()->sole();
-        $page->callAction(TestAction::make('edit')->table($template), ['name' => 'Renamed', 'is_selectable' => false])
+        $page->callAction(TestAction::make('edit')->table($template), ['name' => 'Renamed',
+            'description' => 'Eine Bauwelt für gemeinsames Planen und Gestalten.', 'is_selectable' => false])
             ->assertHasNoActionErrors()->assertNotified('Gespeichert');
         $this->assertSame('Renamed', $template->fresh()->name);
         $this->assertFalse($template->fresh()->is_selectable);
+        $this->assertSame('Eine Bauwelt für gemeinsames Planen und Gestalten.', $template->fresh()->description);
+        $page->mountAction(TestAction::make('edit')->table($template))
+            ->assertActionDataSet(['description' => 'Eine Bauwelt für gemeinsames Planen und Gestalten.']);
+        app(PortalWorldTemplates::class)->import($actor, $this->archive());
+        $this->assertSame('Eine Bauwelt für gemeinsames Planen und Gestalten.', $template->fresh()->description);
         $this->expectException(ValidationException::class);
         app(LuantiWorldTemplateRegistry::class)->update($actor, $template, ['luanti_server_id' => null,
             'name' => 'Renamed', 'template_identifier' => 'replacement', 'is_selectable' => true]);
+    }
+
+    public function test_library_descriptions_are_copied_to_servers_and_updates_preserve_the_game_revision(): void
+    {
+        $actor = User::factory()->globalAdmin()->create();
+        $library = app(PortalWorldTemplates::class);
+        $template = $library->import($actor, $this->archive());
+        $originalRevision = $template->revision;
+        $originalBundle = $template->bundle_sha256;
+        $server = LuantiServer::factory()->create();
+        $library->registerCommissioned($server, $library->snapshot());
+        $attributes = $template->only(['name', 'template_identifier', 'is_selectable']);
+        app(LuantiWorldTemplateRegistry::class)->update($actor, $template, [...$attributes, 'description' => '  Eine offene Bauwelt.  ']);
+
+        $this->assertSame('Eine offene Bauwelt.', $template->fresh()->description);
+        $this->assertSame('Eine offene Bauwelt.', $server->templates()->sole()->description);
+        $second = LuantiServer::factory()->create();
+        $library->registerCommissioned($second, $library->snapshot());
+        $this->assertSame('Eine offene Bauwelt.', $second->templates()->sole()->description);
+        $this->assertSame($originalRevision, $template->fresh()->revision);
+        $this->assertSame($originalBundle, $template->fresh()->bundle_sha256);
+
+        app(LuantiWorldTemplateRegistry::class)->update($actor, $template, [...$attributes, 'description' => '   ']);
+        $this->assertNull($template->fresh()->description);
+        $this->assertNull($second->templates()->sole()->description);
+    }
+
+    public function test_template_description_validation_preserves_existing_text_on_invalid_input(): void
+    {
+        $actor = User::factory()->globalAdmin()->create();
+        $template = app(PortalWorldTemplates::class)->import($actor, $this->archive());
+        $template->update(['description' => 'Vorhandene Beschreibung']);
+        $attributes = $template->only(['name', 'template_identifier', 'is_selectable']);
+        foreach ([str_repeat('x', 5001), ['unexpected' => 'array']] as $description) {
+            try {
+                app(LuantiWorldTemplateRegistry::class)->update($actor, $template, [...$attributes, 'description' => $description]);
+                $this->fail('Invalid description was saved.');
+            } catch (ValidationException $exception) {
+                $this->assertArrayHasKey('description', $exception->errors());
+            }
+        }
+        $this->assertSame('Vorhandene Beschreibung', $template->fresh()->description);
+        app(LuantiWorldTemplateRegistry::class)->update($actor, $template, $attributes);
+        $this->assertSame('Vorhandene Beschreibung', $template->fresh()->description);
     }
 
     public function test_server_installation_commissions_the_entire_creation_snapshot_and_requires_confirmation(): void

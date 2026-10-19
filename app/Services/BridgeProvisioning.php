@@ -20,7 +20,7 @@ class BridgeProvisioning
     public function __construct(private PortalSettings $settings, private GithubBridgeSource $source, private LuantiDockerInstallation $engine, private LuantiSshClient $ssh) {}
 
     /**
-     * @param  list<array{template_id: string, name: string, revision: string, bundle_sha256: string, is_selectable: bool}>|null  $templates
+     * @param  list<array{template_id: string, name: string, description?: string|null, revision: string, bundle_sha256: string, is_selectable: bool}>|null  $templates
      * @return array{configuration: array<string, mixed>, commit: string}|null
      */
     public function prepare(User $actor, ?array $templates = null): ?array

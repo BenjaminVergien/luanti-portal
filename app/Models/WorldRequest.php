@@ -21,7 +21,8 @@ class WorldRequest extends Model
     {
         return ['start_date' => 'date:Y-m-d', 'end_date' => 'date:Y-m-d', 'participant_count' => 'integer',
             'status' => WorldRequestStatus::class, 'decided_at' => 'datetime', 'revision' => 'integer', 'approved_access' => 'array',
-            'template_snapshot' => 'array', 'provisioning_configuration' => 'array'];
+            'template_snapshot' => 'array', 'provisioning_configuration' => 'array',
+            'provisioning_starts_at' => 'immutable_datetime', 'approval_mail_revision' => 'integer'];
     }
 
     public function organization(): BelongsTo
@@ -57,6 +58,11 @@ class WorldRequest extends Model
     public function provisionedServer(): HasOne
     {
         return $this->hasOne(LuantiServer::class)->withTrashed();
+    }
+
+    public function facilitatorAccount(): BelongsTo
+    {
+        return $this->belongsTo(LuantiAccount::class, 'facilitator_account_id');
     }
 
     public function latestGameInstance(): ?LuantiGameInstance

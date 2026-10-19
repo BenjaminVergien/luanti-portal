@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Enums\MembershipRole;
 use App\Enums\WorldRequestStatus;
 use App\Filament\Pages\WorldRequests as WorldRequestsPage;
 use App\Jobs\ProvisionLuantiBridge;
@@ -18,6 +19,7 @@ use App\Services\LuantiServerRegistry;
 use App\Services\PortalWorldTemplates;
 use App\Services\WorldRequestProvisioning;
 use App\Services\WorldRequests;
+use Carbon\CarbonImmutable;
 use Filament\Actions\Testing\TestAction;
 use Filament\Facades\Filament;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -97,6 +99,7 @@ class WorldRequestProvisioningTest extends TestCase
 
     public function test_portal_lists_library_templates_and_submits_without_any_game_server(): void
     {
+        $this->template->update(['description' => 'Gemeinsam eine eigene Bauwelt gestalten.']);
         $this->panel($this->membership->user, 'portal');
         Livewire::test(WorldRequestsPage::class)->callAction('create', [
             'name' => 'Jugendtreff', 'luanti_world_template_id' => $this->template->id,
@@ -104,6 +107,7 @@ class WorldRequestProvisioningTest extends TestCase
         ])->assertHasNoActionErrors()->assertNotified('Weltantrag eingereicht');
         $this->assertDatabaseCount('luanti_servers', 0);
         $this->assertSame($this->template->bundle_sha256, WorldRequest::query()->sole()->template_snapshot['bundle_sha256']);
+        $this->assertSame('Gemeinsam eine eigene Bauwelt gestalten.', WorldRequest::query()->sole()->template_snapshot['description']);
         Http::assertNothingSent();
         Queue::assertNotPushed(ProvisionWorldRequest::class);
     }
@@ -114,6 +118,92 @@ class WorldRequestProvisioningTest extends TestCase
         app(PortalWorldTemplates::class)->registerCommissioned($server, app(PortalWorldTemplates::class)->snapshot());
         $options = app(WorldRequests::class)->worldOptions($this->membership->user, $this->membership->organization);
         $this->assertSame([$this->template->id => 'Dev'], $options);
+    }
+
+    public function test_future_approval_waits_for_berlin_midnight_even_if_a_job_is_run_early(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-10-19 12:00', 'Europe/Berlin'));
+        $request = $this->submit();
+        $request->update(['start_date' => '2026-10-25', 'end_date' => '2026-10-26']);
+        $this->approve($request);
+        $starts = $request->fresh()->provisioning_starts_at;
+        $this->assertSame('2026-10-24 22:00:00', $starts->utc()->format('Y-m-d H:i:s'));
+        $this->assertSame('2026-10-25 00:00:00', $starts->setTimezone('Europe/Berlin')->format('Y-m-d H:i:s'));
+        $approval = json_decode(DB::table('world_request_mails')->sole()->payload, true);
+        $this->assertFalse($approval['startsImmediately']);
+        $this->assertSame('25.10.2026 00:00', $approval['provisioningAt']);
+        Queue::assertNotPushed(ProvisionWorldRequest::class);
+        app(WorldRequestProvisioning::class)->process($request->id);
+        $this->assertDatabaseCount('luanti_servers', 0);
+        Http::assertNothingSent();
+        $this->travelTo($starts->subSecond());
+        app(WorldRequestProvisioning::class)->process($request->id);
+        $this->assertDatabaseCount('luanti_servers', 0);
+        $this->travelTo($starts);
+        $this->mock(HetznerVirtualMachines::class)->shouldReceive('create')->once()
+            ->withArgs(fn (User $actor, array $data, WorldRequest $pending): bool => $pending->id === $request->id)
+            ->andReturnUsing(fn (): LuantiServer => LuantiServer::factory()->hetznerVm()->create(['world_request_id' => $request->id]));
+        app(WorldRequestProvisioning::class)->process($request->id);
+        $this->assertSame(1, LuantiServer::query()->count());
+    }
+
+    public function test_late_approval_starts_immediately_when_the_requested_period_has_already_begun(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-10-19 12:00', 'Europe/Berlin'));
+        $request = $this->submit();
+        $this->travelTo(CarbonImmutable::parse('2026-10-21 13:00', 'Europe/Berlin'));
+        $this->approve($request);
+        $this->assertTrue($request->fresh()->provisioning_starts_at->isPast());
+        $this->assertTrue(json_decode(DB::table('world_request_mails')->sole()->payload, true)['startsImmediately']);
+        Queue::assertPushed(ProvisionWorldRequest::class);
+        $this->mock(HetznerVirtualMachines::class)->shouldReceive('create')->once()
+            ->andReturnUsing(fn (): LuantiServer => LuantiServer::factory()->hetznerVm()->create(['world_request_id' => $request->id]));
+        app(WorldRequestProvisioning::class)->process($request->id);
+        $this->assertNotNull($request->fresh()->provisionedServer);
+    }
+
+    public function test_a_request_whose_entire_period_has_expired_is_not_approved_or_provisioned(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-10-19 12:00', 'Europe/Berlin'));
+        $request = $this->submit();
+        $this->travelTo(CarbonImmutable::parse('2026-10-27 00:00', 'Europe/Berlin'));
+        try {
+            $this->approve($request);
+            $this->fail('An expired request was approved.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('end_date', $exception->errors());
+        }
+        $this->assertSame(WorldRequestStatus::Pending, $request->fresh()->status);
+        Queue::assertNotPushed(ProvisionWorldRequest::class);
+        Http::assertNothingSent();
+    }
+
+    public function test_request_dialog_shows_all_template_descriptions_as_escaped_text_with_line_breaks(): void
+    {
+        $this->template->update(['description' => "Gemeinsam bauen.\n<script>alert('unsafe')</script>"]);
+        $other = LuantiWorldTemplate::factory()->create(['luanti_server_id' => null, 'library_identifier' => 'test',
+            'name' => 'Test', 'description' => 'Eine Welt für erste Schritte.']);
+        $retired = LuantiWorldTemplate::factory()->retired()->create(['description' => 'Nicht öffentlich auswählbare Beschreibung']);
+        foreach ([MembershipRole::Staff, MembershipRole::Manager] as $role) {
+            $this->membership->update(['role' => $role]);
+            $this->panel($this->membership->user, 'portal');
+            Livewire::test(WorldRequestsPage::class)->mountAction('create')
+                ->assertMountedActionModalSee('Gemeinsam bauen.')
+                ->assertMountedActionModalSee('Eine Welt für erste Schritte.')
+                ->assertMountedActionModalDontSee('Nicht öffentlich auswählbare Beschreibung')
+                ->assertMountedActionModalSeeHtml('&lt;script&gt;')->assertMountedActionModalDontSeeHtml('<script>alert(')
+                ->assertMountedActionModalSeeHtml('Gemeinsam bauen.<br');
+        }
+
+        $descriptions = app(WorldRequests::class)->worldDescriptions($this->membership->user, $this->membership->organization);
+        $this->assertArrayHasKey($other->id, $descriptions);
+        $this->assertArrayNotHasKey($retired->id, $descriptions);
+    }
+
+    public function test_template_descriptions_do_not_bypass_tenant_access(): void
+    {
+        $this->expectException(AuthorizationException::class);
+        app(WorldRequests::class)->worldDescriptions(User::factory()->create(), $this->membership->organization);
     }
 
     public function test_admin_approval_dialog_explains_costs_and_queues_provisioning_without_creating_a_vm_inline(): void
@@ -191,6 +281,9 @@ class WorldRequestProvisioningTest extends TestCase
         $this->assertSame($fresh->current_game_instance_id, $fresh->approved_access['instance_id']);
         $this->assertSame(1, $fresh->gameInstances()->count());
         $this->assertNull($fresh->provisioning_error);
+        $this->assertNotNull($fresh->facilitator_account_id);
+        $this->assertSame('facilitator', $fresh->facilitatorAccount->role);
+        $this->assertSame(1, $fresh->luantiAccounts()->count());
         $this->assertDatabaseCount('luanti_servers', 1);
         Http::assertSentCount(3);
     }

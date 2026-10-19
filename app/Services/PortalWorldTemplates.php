@@ -57,7 +57,7 @@ class PortalWorldTemplates
         });
     }
 
-    /** @return list<array{template_id: string, name: string, revision: string, bundle_sha256: string, is_selectable: bool}> */
+    /** @return list<array{template_id: string, name: string, description: string|null, revision: string, bundle_sha256: string, is_selectable: bool}> */
     public function snapshot(): array
     {
         $result = [];
@@ -80,21 +80,22 @@ class PortalWorldTemplates
             if ($bytes > self::MAX_ARCHIVE_BYTES || $expandedBytes > 134217728 || count($result) >= 1000) {
                 throw ValidationException::withMessages(['bundle' => 'Die Vorlagenbibliothek überschreitet die Bereitstellungsgrenze von 64 MiB ZIP-Daten oder 128 MiB Weltdaten.']);
             }
-            $result[] = ['template_id' => $template->template_identifier, 'name' => $template->name,
+            $result[] = ['template_id' => $template->template_identifier, 'name' => $template->name, 'description' => $template->description,
                 'revision' => $template->revision, 'bundle_sha256' => $template->bundle_sha256, 'is_selectable' => $template->is_selectable];
         }
 
         return $result;
     }
 
-    /** @param list<array{template_id: string, name: string, revision: string, bundle_sha256: string, is_selectable: bool}> $snapshot */
+    /** @param list<array{template_id: string, name: string, description?: string|null, revision: string, bundle_sha256: string, is_selectable: bool}> $snapshot */
     public function registerCommissioned(LuantiServer $server, array $snapshot): void
     {
         DB::transaction(function () use ($server, $snapshot): void {
             foreach ($snapshot as $entry) {
                 LuantiWorldTemplate::query()->updateOrCreate(
                     ['luanti_server_id' => $server->id, 'template_identifier' => $entry['template_id']],
-                    ['name' => $entry['name'], 'revision' => $entry['revision'], 'is_selectable' => $entry['is_selectable']],
+                    ['name' => $entry['name'], 'revision' => $entry['revision'], 'is_selectable' => $entry['is_selectable'],
+                        ...(array_key_exists('description', $entry) ? ['description' => $entry['description']] : [])],
                 )->forceFill(['bundle_sha256' => $entry['bundle_sha256'], 'is_available' => true, 'commissioned_at' => now()])->save();
             }
         });

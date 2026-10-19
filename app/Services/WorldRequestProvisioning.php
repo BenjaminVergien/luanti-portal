@@ -7,6 +7,7 @@ use App\Jobs\ProvisionWorldRequest;
 use App\Models\LuantiServer;
 use App\Models\User;
 use App\Models\WorldRequest;
+use Carbon\CarbonImmutable;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Http\Client\ConnectionException;
@@ -51,6 +52,11 @@ class WorldRequestProvisioning
                 || $request->provisioning_configuration === null || $request->provisioning_error !== null) {
                 return;
             }
+            $starts = $request->provisioning_starts_at
+                ?? CarbonImmutable::parse($request->start_date->toDateString(), 'Europe/Berlin')->startOfDay();
+            if ($starts->isFuture()) {
+                return;
+            }
             try {
                 $actor = User::query()->find($request->decided_by);
                 if ($actor === null || ! Gate::forUser($actor)->allows('create', LuantiServer::class)) {
@@ -58,6 +64,9 @@ class WorldRequestProvisioning
                 }
                 $server = $request->provisionedServer;
                 if ($server === null) {
+                    if (CarbonImmutable::parse($request->end_date->toDateString(), 'Europe/Berlin')->addDay()->startOfDay()->lessThanOrEqualTo(now())) {
+                        throw ValidationException::withMessages(['provisioning' => 'Der genehmigte Zeitraum ist bereits abgelaufen. Es wird keine neue VM erstellt.']);
+                    }
                     $server = app(HetznerVirtualMachines::class)->create($actor, $request->provisioning_configuration, $request);
                 }
                 if ($server->trashed() || in_array($server->hetzner_status, ['deleted', 'deleting', 'create_failed', 'key_pending'], true)) {
@@ -96,6 +105,7 @@ class WorldRequestProvisioning
                     $request->forceFill(['current_game_instance_id' => $instance->id]);
                     $request->forceFill(['approved_access' => app(LuantiAccounts::class)->snapshot($request),
                         'provisioning_error' => null, 'revision' => $request->revision + 1])->save();
+                    app(WorldRequestMailings::class)->ensureFacilitatorAccount($request);
                 });
             } catch (ValidationException $exception) {
                 $request->forceFill(['provisioning_error' => collect($exception->errors())->flatten()->first()])->save();
@@ -118,7 +128,7 @@ class WorldRequestProvisioning
                 throw ValidationException::withMessages(['provisioning' => 'Für diesen Antrag ist keine Serverbereitstellung offen.']);
             }
             $server = $request->provisionedServer;
-            if ($server !== null && ! $server->trashed()) {
+            if ($server !== null && ! $server->trashed() && ! $request->provisioning_starts_at?->isFuture()) {
                 if ($server->hetzner_status === 'key_pending') {
                     app(HetznerVirtualMachines::class)->retryKeySetup($actor, $server);
                 } elseif ($server->bridge_status === 'failed' && $server->hetzner_status === 'running') {
@@ -127,7 +137,9 @@ class WorldRequestProvisioning
             }
             $request->forceFill(['decided_by' => $actor->id, 'provisioning_error' => null])->save();
             app(UniqueLock::class)->release(new ProvisionWorldRequest($request->id));
-            ProvisionWorldRequest::dispatch($request->id)->afterCommit();
+            if (! $request->provisioning_starts_at?->isFuture()) {
+                ProvisionWorldRequest::dispatch($request->id)->afterCommit();
+            }
 
             return true;
         });

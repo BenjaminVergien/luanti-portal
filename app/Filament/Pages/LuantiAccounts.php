@@ -192,7 +192,7 @@ class LuantiAccounts extends AccessTablePage
     private function request(): WorldRequest
     {
         abort_unless(static::canAccess(), 403);
-        $request = WorldRequest::query()->with('world.server', 'currentGameInstance.server', 'organization')->findOrFail($this->worldRequestId);
+        $request = WorldRequest::query()->with('world.server', 'currentGameInstance.server', 'organization', 'facilitatorAccount')->findOrFail($this->worldRequestId);
         abort_if(! $this->isInternalPanel() && $request->organization_id !== Filament::getTenant()->id, 404);
         abort_unless($request->status === WorldRequestStatus::Approved || $request->approved_access !== null
             || LuantiAccount::query()->where('world_request_id', $request->id)->exists(), 404);

@@ -91,6 +91,7 @@ class LuantiGameInstances
                     $target->update(['state' => $result['state'], 'error' => null]);
                     if ($active && $result['state'] === 'running') {
                         ProcessLuantiAccounts::dispatch($request->id);
+                        app(WorldRequestMailings::class)->queueReadyIfEnterable($request->id);
                     }
                 }
             });
