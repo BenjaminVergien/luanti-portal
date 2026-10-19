@@ -33,6 +33,13 @@ class ProvisionLuantiBridge implements ShouldBeUniqueUntilProcessing, ShouldQueu
         if ($provisioning->process($this->serverId)) {
             $server = LuantiServer::query()->find($this->serverId);
             self::dispatch($this->serverId)->delay($server?->public_provisioning_next_at ?? now()->addSeconds(30));
+
+            return;
+        }
+        $server = LuantiServer::query()->find($this->serverId);
+        if ($server?->world_request_id !== null && $server->bridge_status === 'installed'
+            && $server->luanti_installation_status === 'verified' && $server->hetzner_status === 'running') {
+            ProvisionWorldRequest::dispatch($server->world_request_id)->afterCommit();
         }
     }
 }

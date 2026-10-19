@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\WorldRequestStatus;
 use App\Jobs\ProvisionWorldRequest;
+use App\Jobs\ReconcileLuantiGame;
 use App\Models\LuantiServer;
 use App\Models\User;
 use App\Models\WorldRequest;
@@ -106,6 +107,7 @@ class WorldRequestProvisioning
                     $request->forceFill(['approved_access' => app(LuantiAccounts::class)->snapshot($request),
                         'provisioning_error' => null, 'revision' => $request->revision + 1])->save();
                     app(WorldRequestMailings::class)->ensureFacilitatorAccount($request);
+                    ReconcileLuantiGame::dispatch($request->id)->afterCommit();
                 });
             } catch (ValidationException $exception) {
                 $request->forceFill(['provisioning_error' => collect($exception->errors())->flatten()->first()])->save();

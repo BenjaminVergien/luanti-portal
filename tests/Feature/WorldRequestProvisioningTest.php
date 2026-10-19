@@ -5,8 +5,11 @@ namespace Tests\Feature;
 use App\Enums\MembershipRole;
 use App\Enums\WorldRequestStatus;
 use App\Filament\Pages\WorldRequests as WorldRequestsPage;
+use App\Jobs\ProcessLuantiAccounts;
 use App\Jobs\ProvisionLuantiBridge;
 use App\Jobs\ProvisionWorldRequest;
+use App\Jobs\ReconcileLuantiGame;
+use App\Models\LuantiAccountJob;
 use App\Models\LuantiServer;
 use App\Models\LuantiWorldTemplate;
 use App\Models\OrganizationMembership;
@@ -15,6 +18,7 @@ use App\Models\WorldRequest;
 use App\Services\BridgeProvisioning;
 use App\Services\HetznerVirtualMachines;
 use App\Services\LuantiAccounts;
+use App\Services\LuantiGameInstances;
 use App\Services\LuantiServerRegistry;
 use App\Services\PortalWorldTemplates;
 use App\Services\WorldRequestProvisioning;
@@ -22,6 +26,7 @@ use App\Services\WorldRequests;
 use Carbon\CarbonImmutable;
 use Filament\Actions\Testing\TestAction;
 use Filament\Facades\Filament;
+use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
@@ -286,6 +291,69 @@ class WorldRequestProvisioningTest extends TestCase
         $this->assertSame(1, $fresh->luantiAccounts()->count());
         $this->assertDatabaseCount('luanti_servers', 1);
         Http::assertSentCount(3);
+    }
+
+    public function test_completed_bridge_job_immediately_resumes_its_world_request_without_a_scheduler_run(): void
+    {
+        $request = $this->submit();
+        $this->approve($request);
+        $server = LuantiServer::factory()->hetznerVm()->create(['world_request_id' => $request->id,
+            'bridge_status' => 'installed', 'luanti_installation_status' => 'verified']);
+        Queue::getFacadeRoot()->releaseUniqueJobLocks();
+        Queue::fake();
+        $bridge = $this->mock(BridgeProvisioning::class);
+        $bridge->shouldReceive('process')->once()->with($server->id)->andReturn(false);
+        (new ProvisionLuantiBridge($server->id))->handle($bridge);
+        Queue::assertPushed(ProvisionWorldRequest::class, fn (ProvisionWorldRequest $job): bool => $job->requestId === $request->id);
+    }
+
+    public function test_incomplete_bridge_does_not_resume_the_world_as_if_the_server_were_ready(): void
+    {
+        $request = $this->submit();
+        $this->approve($request);
+        $server = LuantiServer::factory()->hetznerVm()->create(['world_request_id' => $request->id,
+            'bridge_status' => 'failed', 'luanti_installation_status' => 'verified']);
+        Queue::fake();
+        $bridge = $this->mock(BridgeProvisioning::class);
+        $bridge->shouldReceive('process')->once()->with($server->id)->andReturn(false);
+        (new ProvisionLuantiBridge($server->id))->handle($bridge);
+        Queue::assertNotPushed(ProvisionWorldRequest::class);
+    }
+
+    public function test_ready_vm_continues_through_world_start_and_facilitator_admission_without_the_scheduler(): void
+    {
+        $request = $this->submit();
+        $this->approve($request);
+        $server = LuantiServer::factory()->hetznerVm()->create(['world_request_id' => $request->id,
+            'bridge_status' => 'installed', 'luanti_installation_status' => 'verified',
+            'api_base_url' => 'https://bridge.example.test', 'api_token' => 'test-token']);
+        app(PortalWorldTemplates::class)->registerCommissioned($server, [[...$request->fresh()->template_snapshot, 'is_selectable' => true]]);
+        app(WorldRequestProvisioning::class)->process($request->id);
+        Queue::assertPushed(ReconcileLuantiGame::class, fn (ReconcileLuantiGame $job): bool => $job->requestId === $request->id);
+        $this->assertSame('preparing', $request->fresh()->currentGameInstance->state);
+        $instanceIdentifier = $request->fresh()->currentGameInstance->instance_identifier;
+        Http::fake(['https://bridge.example.test/*' => function (Request $http) use ($instanceIdentifier): PromiseInterface {
+            $data = json_decode($http->body(), true, flags: JSON_THROW_ON_ERROR);
+            if (str_contains($http->url(), '/lifecycle/')) {
+                return Http::response(['version' => 1, 'job_id' => $data['job_id'], 'state' => 'completed',
+                    'result' => ['version' => 2, 'job_id' => $data['job_id'], 'instance_id' => $data['instance_id'],
+                        'ok' => true, 'state' => $data['operation'] === 'start_instance' ? 'running' : 'stopped']]);
+            }
+
+            return Http::response(['version' => 1, 'world_id' => $instanceIdentifier, 'job_id' => $data['job_id'], 'state' => 'completed',
+                'result' => ['version' => 2, 'job_id' => $data['job_id'], 'status' => 'ok',
+                    'accounts' => array_map(fn (array $account): array => ['username' => $account['username'], 'status' => 'created'], $data['accounts'])]]);
+        }]);
+        (new ReconcileLuantiGame($request->id))->handle(app(LuantiGameInstances::class));
+        $this->assertSame('running', $request->fresh()->currentGameInstance->state);
+        Queue::assertPushed(ProcessLuantiAccounts::class);
+        (new ProcessLuantiAccounts($request->id))->handle(app(LuantiAccounts::class));
+        $this->assertSame('completed', LuantiAccountJob::query()->sole()->state);
+        $this->assertDatabaseHas('world_request_mails', ['world_request_id' => $request->id, 'kind' => 'ready']);
+        $this->assertDatabaseCount('luanti_servers', 1);
+        $this->assertDatabaseCount('luanti_game_instances', 1);
+        $this->assertDatabaseCount('luanti_accounts', 1);
+        Http::assertSentCount(4);
     }
 
     public function test_unknown_create_result_never_submits_a_second_vm_and_recovers_by_lookup(): void

@@ -550,6 +550,10 @@ period has not ended. Future requests start at 00:00 on their first day in
 them up within its next run. Setup takes additional minutes. The scheduler also
 recovers provisioning and connects the confirmed template to its private game
 instance. The requested template revision is retained even if the library changes.
+Completed bridge installation queues the request's next provisioning step
+directly; creation of its private instance then queues world preparation/start.
+The minute scheduler remains necessary to recover interrupted jobs, poll pending
+operations, and enforce future start/end times.
 Approval queues a German confirmation email to the applicant. An automatic
 facilitator game account is created once; its encrypted initial password can be
 revealed by authorized users under **Spielaccounts** in the portal. A second email
@@ -623,8 +627,9 @@ backup. Keep copies off the VM as well. Retain the exact application/lockfiles,
 vendor dependencies and compiled/published assets for the previous release.
 
 1. Put the portal into maintenance mode (`sudo -u portal php8.5 artisan down`)
-   from its application directory. Temporarily disable its cron entry, let any
-   running scheduler finish, and stop `luanti-portal-worker` gracefully. Do not
+   from its application directory. Keep `/etc/cron.d/luanti-portal` in place:
+   the current scheduled tasks skip maintenance mode automatically. Let any
+   already running scheduler finish, and stop `luanti-portal-worker` gracefully. Do not
    interrupt a provisioning job halfway through its shutdown grace period.
 2. Create a root-only backup directory (`umask 077`) outside the document root.
    Back up `.env` including the original `APP_KEY`, all `storage/app/private/`
@@ -649,8 +654,12 @@ vendor dependencies and compiled/published assets for the previous release.
    the persistent database, `.env`, or private storage. Install locked production
    dependencies as above; run `migrate --force --no-interaction`, then `optimize`.
    Never run `composer update` on the server.
-4. Reload PHP-FPM for OPcache, start/restart the queue worker, restore the cron
-   entry, and run `artisan up`. On normal rolling updates, `artisan queue:restart`
+4. Reload PHP-FPM for OPcache, start/restart the queue worker, verify the cron
+   entry still exists, and run `artisan up`. Confirm a new entry appears in
+   `storage/logs/scheduler.log` within the next minute. If an older update moved
+   the cron file into its backup directory, restore it after completing that
+   update; a running `cron` service alone does not prove the portal is scheduled.
+   On normal rolling updates, `artisan queue:restart`
    asks workers to exit after their current job; systemd starts them again.
    Environment/SMTP changes require `config:cache` and worker restart too.
 5. Check `/up`, login, a controlled queued email and Foundry before reopening
