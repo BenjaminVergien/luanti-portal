@@ -37,7 +37,7 @@ class WorldRequestPolicy
         $user = $user->fresh();
         $request = $request->fresh();
 
-        return $user !== null && $request !== null && $request->status !== WorldRequestStatus::Rejected
+        return $user !== null && $request !== null && ! in_array($request->status, [WorldRequestStatus::Rejected, WorldRequestStatus::Terminated], true)
             && $this->view($user, $request)
             && ($user->isInternal() || $user->manages($request->organization) || $user->id === $request->user_id);
     }
@@ -47,11 +47,22 @@ class WorldRequestPolicy
         return ($user->fresh()?->isInternal() ?? false) && $request->fresh()?->status === WorldRequestStatus::Pending;
     }
 
+    public function terminate(User $user, WorldRequest $request): bool
+    {
+        $user = $user->fresh();
+        $request = $request->fresh();
+
+        return $user !== null && $request !== null && $user->is_active && $user->hasVerifiedEmail()
+            && $request->status !== WorldRequestStatus::Terminated && $this->view($user, $request)
+            && ($user->isInternal() || $user->manages($request->organization) || $user->id === $request->user_id);
+    }
+
     public function manageAccounts(User $user, WorldRequest $request): bool
     {
         $user = $user->fresh();
         $request = $request->fresh();
-        if ($user === null || $request === null || ! $user->is_active || ! $user->hasVerifiedEmail()) {
+        if ($user === null || $request === null || ! $user->is_active || ! $user->hasVerifiedEmail()
+            || $request->status === WorldRequestStatus::Terminated) {
             return false;
         }
         if ($user->isInternal()) {

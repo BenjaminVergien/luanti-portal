@@ -4,6 +4,7 @@ use App\Enums\WorldRequestStatus;
 use App\Jobs\CleanupLuantiDns;
 use App\Jobs\ProvisionLuantiBridge;
 use App\Jobs\ProvisionWorldRequest;
+use App\Jobs\TerminateWorldRequest;
 use App\Models\LuantiServer;
 use App\Models\WorldRequest;
 use App\Services\WorldRequestMailings;
@@ -20,6 +21,11 @@ Schedule::call(function (): void {
         ->where(fn (Builder $query): Builder => $query->whereNull('provisioning_starts_at')->orWhere('provisioning_starts_at', '<=', now()))
         ->each(fn (WorldRequest $request) => ProvisionWorldRequest::dispatch($request->id));
 })->name('world-request-provisioning-recovery')->everyMinute()->withoutOverlapping();
+Schedule::call(function (): void {
+    WorldRequest::query()->where('status', WorldRequestStatus::Terminated)
+        ->whereHas('provisionedServer', fn (Builder $query): Builder => $query->where('hetzner_status', '<>', 'deleted'))
+        ->each(fn (WorldRequest $request) => TerminateWorldRequest::dispatch($request->id));
+})->name('world-request-termination-recovery')->everyMinute()->withoutOverlapping();
 Schedule::call(fn () => app(WorldRequestMailings::class)->recover())
     ->name('world-request-mail-recovery')->everyMinute()->withoutOverlapping();
 Schedule::call(function (): void {

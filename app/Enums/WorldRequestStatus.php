@@ -7,11 +7,12 @@ enum WorldRequestStatus: string
     case Pending = 'pending';
     case Approved = 'approved';
     case Rejected = 'rejected';
+    case Terminated = 'terminated';
 
     public function label(): string
     {
         return match ($this) {
-            self::Pending => 'Offen', self::Approved => 'Genehmigt', self::Rejected => 'Abgelehnt',
+            self::Pending => 'Offen', self::Approved => 'Genehmigt', self::Rejected => 'Abgelehnt', self::Terminated => 'Beendet',
         };
     }
 

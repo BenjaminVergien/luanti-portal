@@ -122,6 +122,13 @@ class WorldRequestMailings
             ]);
             try {
                 $request = WorldRequest::query()->findOrFail($mail->world_request_id);
+                if ($request->status === WorldRequestStatus::Terminated) {
+                    DB::table('world_request_mails')->where('id', $mailId)->update([
+                        'attempts' => 5, 'next_attempt_at' => null, 'last_error' => 'Der Weltantrag wurde beendet. Die Status-E-Mail wird nicht mehr versendet.',
+                    ]);
+
+                    return;
+                }
                 Mail::to($request->applicant->email)->send(new WorldRequestStatusMail($mail->kind,
                     json_decode($mail->payload, true, flags: JSON_THROW_ON_ERROR)));
                 DB::table('world_request_mails')->where('id', $mailId)->update([

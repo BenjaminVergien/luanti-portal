@@ -133,7 +133,7 @@ class WorldRequests
                             $snapshot = app(LuantiAccounts::class)->snapshot($request);
                             foreach (WorldRequest::query()->whereKeyNot($request->id)->whereNotNull('approved_access')->get() as $other) {
                                 $access = $other->approved_access;
-                                if ($other->status !== WorldRequestStatus::Rejected && ($access['server_id'] ?? null) === $serverId
+                                if (! in_array($other->status, [WorldRequestStatus::Rejected, WorldRequestStatus::Terminated], true) && ($access['server_id'] ?? null) === $serverId
                                     && $access['starts_at'] < $snapshot['ends_at'] && $access['ends_at'] > $snapshot['starts_at']) {
                                     throw ValidationException::withMessages(['start_date' => 'Der Server ist in diesem Zeitraum bereits für eine andere Spielinstanz reserviert.']);
                                 }

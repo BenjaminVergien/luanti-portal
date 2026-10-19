@@ -12,6 +12,7 @@ use App\Services\HetznerVirtualMachines;
 use App\Services\LuantiGameInstances;
 use App\Services\WorldRequestProvisioning;
 use App\Services\WorldRequests as WorldRequestService;
+use App\Services\WorldRequestTermination;
 use Closure;
 use Filament\Actions\Action;
 use Filament\Facades\Filament;
@@ -27,6 +28,7 @@ use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\HtmlString;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 class WorldRequests extends AccessTablePage
@@ -81,11 +83,14 @@ class WorldRequests extends AccessTablePage
                 TextColumn::make('server_name')->label('Server')->state(fn (WorldRequest $record): ?string => $record->world->server?->name ?? $record->provisionedServer?->name)
                     ->placeholder('Wird nach Genehmigung bereitgestellt'),
                 TextColumn::make('currentGameInstance.instance_identifier')->label('Spielinstanz')->placeholder('Noch nicht vorbereitet'),
-                TextColumn::make('instance_status')->label('Spielstatus')->state(fn (WorldRequest $record): string => $record->latestGameInstance()?->statusLabel()
+                TextColumn::make('instance_status')->label('Spielstatus')->state(fn (WorldRequest $record): string => $record->status === WorldRequestStatus::Terminated
+                    ? ($record->provisioning_error !== null ? 'Serverlöschung wird erneut geprüft'
+                        : ($record->provisionedServer !== null && $record->provisionedServer->hetzner_status !== 'deleted' ? 'Server wird gelöscht' : 'Beendet'))
+                    : $record->latestGameInstance()?->statusLabel()
                     ?? $record->currentGameInstance?->statusLabel() ?? ($record->provisioning_error !== null ? 'Bereitstellung fehlgeschlagen'
                         : ($record->provisioning_starts_at?->isFuture() ? 'Geplant ab '.$record->provisioning_starts_at->setTimezone('Europe/Berlin')->format('d.m.Y H:i')
                             : ($record->provisioning_configuration !== null ? 'Server wird bereitgestellt' : 'Wartet auf Genehmigung')))),
-                TextColumn::make('preparation_error')->label('Vorbereitung')->state(fn (WorldRequest $record): ?string => $record->provisioning_error
+                TextColumn::make('preparation_error')->label('Hinweise')->state(fn (WorldRequest $record): ?string => $record->provisioning_error
                     ?? $record->latestGameInstance()?->error ?? $record->currentGameInstance?->error)->wrap(),
                 TextColumn::make('start_date')->label('Startdatum')->date('d.m.Y')->sortable(),
                 TextColumn::make('end_date')->label('Enddatum')->date('d.m.Y')->sortable(),
@@ -95,6 +100,7 @@ class WorldRequests extends AccessTablePage
                     ->formatStateUsing(fn (WorldRequestStatus $state): string => $state->label())
                     ->color(fn (WorldRequestStatus $state): string => match ($state) {
                         WorldRequestStatus::Pending => 'warning', WorldRequestStatus::Approved => 'success', WorldRequestStatus::Rejected => 'danger',
+                        WorldRequestStatus::Terminated => 'gray',
                     }),
                 TextColumn::make('decisionMaker.name')->label('Entschieden von')->placeholder('–'),
                 TextColumn::make('decided_at')->label('Entschieden am')->dateTime('d.m.Y H:i')->timezone('Europe/Berlin')->placeholder('–'),
@@ -121,6 +127,24 @@ class WorldRequests extends AccessTablePage
                     }),
                 $this->decisionAction('approve', 'Genehmigen', true),
                 $this->decisionAction('reject', 'Ablehnen', false),
+                Action::make('terminate')->label('Antrag beenden')->color('danger')->requiresConfirmation()
+                    ->visible(fn (WorldRequest $record): bool => Gate::forUser($this->actor())->allows('terminate', $record))
+                    ->modalHeading('Weltantrag unwiderruflich beenden?')
+                    ->modalDescription('Beendet diesen Antrag und löscht den zugehörigen eigenen Server einschließlich aller Weltdaten, Spielaccounts und Spielfortschritte unwiderruflich. Es wird keine Sicherung erstellt. Ein bereits gelöschter Server wird nicht erneut gelöscht. Der Antrag bleibt als Historie erhalten.')
+                    ->modalSubmitActionLabel('Antrag beenden und Server löschen')
+                    ->fillForm(fn (WorldRequest $record): array => ['revision' => $record->revision])
+                    ->schema([
+                        Hidden::make('revision')->required()->rules(['integer', 'min:1']),
+                        TextInput::make('confirmation_name')->label('Servername zur Bestätigung')->required()->maxLength(255)
+                            ->helperText(fn (WorldRequest $record): string => 'Exakt „'.app(WorldRequestTermination::class)->confirmationName($record).'“ eingeben. Falls noch kein Server geplant ist, gilt der Antragsname.')
+                            ->rules(fn (WorldRequest $record): array => [Rule::in([app(WorldRequestTermination::class)->confirmationName($record)])])
+                            ->validationMessages(['in' => 'Der Name stimmt nicht überein. Bitte den Namen exakt eingeben.']),
+                    ])
+                    ->action(function (WorldRequest $record, array $data, Schema $schema): void {
+                        $this->guardRecord($record);
+                        $this->saveChange($schema, fn () => app(WorldRequestTermination::class)->terminate($this->actor(), $record,
+                            $data['confirmation_name'], (int) $data['revision']), 'Weltantrag beendet. Die Serverlöschung wird automatisch geprüft.');
+                    }),
                 Action::make('retryProvisioning')->label('Serverbereitstellung erneut prüfen')->requiresConfirmation()
                     ->visible(fn (WorldRequest $record): bool => $this->isInternalPanel() && $record->status === WorldRequestStatus::Approved
                         && $record->provisioning_configuration !== null && $record->approved_access === null

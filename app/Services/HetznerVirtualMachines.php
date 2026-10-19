@@ -205,10 +205,33 @@ class HetznerVirtualMachines
     {
         $this->authorize($actor, $server, 'delete');
 
-        return $this->withLock((string) $server->id, function () use ($actor, $server, $confirmationName): LuantiServer {
-            return DB::transaction(function () use ($actor, $server, $confirmationName): LuantiServer {
-                $server = LuantiServer::query()->whereKey($server->id)->lockForUpdate()->firstOrFail();
-                $this->authorize($actor, $server, 'delete');
+        return $this->deleteManagedServer($server, $confirmationName, function (LuantiServer $server) use ($actor): void {
+            $this->authorize($actor, $server, 'delete');
+        });
+    }
+
+    /** Only a committed termination can authorize cleanup of its own dedicated VM. */
+    public function deleteForTerminatedRequest(WorldRequest $request): ?LuantiServer
+    {
+        $request = $request->fresh();
+        $server = $request->provisionedServer;
+        if ($server === null) {
+            return null;
+        }
+
+        return $this->deleteManagedServer($server, $server->name, function (LuantiServer $server) use ($request): void {
+            abort_unless($request->fresh()->status === WorldRequestStatus::Terminated
+                && $server->world_request_id === $request->id && $server->hetzner_reference !== null, 403);
+        });
+    }
+
+    /** @param Closure(LuantiServer): void $authorize */
+    private function deleteManagedServer(LuantiServer $server, ?string $confirmationName, Closure $authorize): LuantiServer
+    {
+        return $this->withLock((string) $server->id, function () use ($authorize, $server, $confirmationName): LuantiServer {
+            return DB::transaction(function () use ($authorize, $server, $confirmationName): LuantiServer {
+                $server = LuantiServer::withTrashed()->whereKey($server->id)->lockForUpdate()->firstOrFail();
+                $authorize($server);
                 Validator::make(['confirmation_name' => $confirmationName], [
                     'confirmation_name' => ['required', 'string', Rule::in([$server->name])],
                 ], [
@@ -226,7 +249,10 @@ class HetznerVirtualMachines
                     return $this->saveMissing($server);
                 }
                 $this->saveRemote($server, $remote);
-                $this->authorize($actor, $server, 'delete');
+                $authorize($server);
+                if ($server->hetzner_status === 'deleting') {
+                    return $server;
+                }
                 try {
                     $response = $this->http->request('DELETE', 'servers/'.$server->hetzner_server_id);
                 } catch (ConnectionException) {

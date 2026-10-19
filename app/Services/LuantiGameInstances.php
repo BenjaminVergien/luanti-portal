@@ -41,12 +41,15 @@ class LuantiGameInstances
     {
         $request = WorldRequest::query()->findOrFail($requestId);
         $serverId = $request->approved_access['server_id'] ?? null;
-        if ($serverId === null) {
+        if ($serverId === null || $request->status === WorldRequestStatus::Terminated) {
             return;
         }
         Cache::lock('luanti:server:'.$serverId, 120)->get(function () use ($requestId): void {
             Cache::lock('luanti:accounts:process:'.$requestId, 120)->get(function () use ($requestId): void {
                 $request = WorldRequest::query()->with('world', 'currentGameInstance')->findOrFail($requestId);
+                if ($request->status === WorldRequestStatus::Terminated) {
+                    return;
+                }
                 $window = ['starts_at' => $request->approved_access['starts_at'], 'ends_at' => $request->approved_access['ends_at']];
                 $target = $request->gameInstances()->where('is_archived', false)->where('luanti_world_template_id', $request->luanti_world_template_id)->latest('id')->first();
                 if ($target === null) {

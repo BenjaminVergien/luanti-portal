@@ -180,7 +180,7 @@ class LuantiAccounts
                 $request->forceFill(['approved_access' => $desired])->save();
             }
             $this->cancelSupersededUnsentJobs($request);
-            if ($request->status === WorldRequestStatus::Rejected) {
+            if (in_array($request->status, [WorldRequestStatus::Rejected, WorldRequestStatus::Terminated], true)) {
                 return;
             }
             if (LuantiAccountJob::query()->where('world_request_id', $requestId)->whereIn('state', ['queued', 'pending', 'unknown'])->exists()) {
@@ -282,6 +282,11 @@ class LuantiAccounts
         Cache::lock('luanti:accounts:process:'.$job->world_request_id, 60)->get(function () use ($job): void {
             $job = DB::transaction(function () use ($job): ?LuantiAccountJob {
                 $request = WorldRequest::query()->whereKey($job->world_request_id)->lockForUpdate()->firstOrFail();
+                if ($request->status === WorldRequestStatus::Terminated) {
+                    $job->update(['state' => 'cancelled']);
+
+                    return null;
+                }
                 $this->cancelSupersededUnsentJobs($request);
                 $job = $job->fresh();
                 if (! in_array($job->state, ['queued', 'pending'], true)) {
