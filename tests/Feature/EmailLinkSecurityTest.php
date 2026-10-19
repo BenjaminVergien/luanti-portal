@@ -32,6 +32,8 @@ use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\URL;
 use Livewire\Livewire;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Symfony\Component\Mailer\Transport\Smtp\EsmtpTransport;
+use Symfony\Component\Mailer\Transport\Smtp\Stream\SocketStream;
 use Symfony\Component\Mime\Email;
 use Tests\TestCase;
 
@@ -61,6 +63,7 @@ class EmailLinkSecurityTest extends TestCase
     #[DataProvider('panels')]
     public function test_reset_email_is_canonical_before_queueing_and_the_link_resets_the_password(string $panel): void
     {
+        config(['auth.passwords.users.expire' => 23]);
         Queue::fake();
         $user = User::factory()->globalAdmin()->create();
         $this->panel($panel);
@@ -84,6 +87,7 @@ class EmailLinkSecurityTest extends TestCase
 
     public function test_registration_verification_email_is_canonical_and_confirms_the_address(): void
     {
+        config(['auth.verification.expire' => 31]);
         Queue::fake();
         $this->panel('portal');
         Livewire::withHeaders($this->hostileHeaders())->test(Register::class)->fillForm([
@@ -194,6 +198,31 @@ class EmailLinkSecurityTest extends TestCase
         }
     }
 
+    public function test_smtp_transport_requires_tls_and_has_a_bounded_timeout_without_connecting(): void
+    {
+        config(['mail.mailers.smtp.url' => null, 'mail.mailers.smtp.host' => 'smtp.example.test', 'mail.mailers.smtp.port' => 587]);
+        $transport = Mail::mailer('smtp')->getSymfonyTransport();
+
+        $this->assertInstanceOf(EsmtpTransport::class, $transport);
+        $this->assertTrue($transport->isTlsRequired());
+        $this->assertInstanceOf(SocketStream::class, $transport->getStream());
+        $this->assertSame(15.0, $transport->getStream()->getTimeout());
+    }
+
+    public function test_loopback_postfix_can_explicitly_disable_tls_without_connecting(): void
+    {
+        config(['mail.mailers.smtp.url' => null, 'mail.mailers.smtp.scheme' => 'smtp',
+            'mail.mailers.smtp.host' => '127.0.0.1', 'mail.mailers.smtp.port' => 25,
+            'mail.mailers.smtp.auto_tls' => false, 'mail.mailers.smtp.require_tls' => false]);
+        $transport = Mail::mailer('smtp')->getSymfonyTransport();
+
+        $this->assertInstanceOf(EsmtpTransport::class, $transport);
+        $this->assertFalse($transport->isAutoTls());
+        $this->assertFalse($transport->isTlsRequired());
+        $this->assertFalse($transport->getStream()->isTLS());
+        $this->assertSame('127.0.0.1', $transport->getStream()->getHost());
+    }
+
     private function panel(string $id): void
     {
         Filament::setCurrentPanel(Filament::getPanel($id));
@@ -227,6 +256,17 @@ class EmailLinkSecurityTest extends TestCase
         $restoredJob->handle(app(ChannelManager::class));
         $message = Mail::mailer('array')->getSymfonyTransport()->messages()->sole()->getOriginalMessage();
         $this->assertMailLinksAreCanonical($message, $url);
+        $isVerification = $job->notification instanceof VerifyEmail;
+        $this->assertSame($isVerification ? 'E-Mail-Adresse bestätigen · Luanti-Portal' : 'Passwort zurücksetzen · Luanti-Portal', $message->getSubject());
+        $minutes = $isVerification ? config('auth.verification.expire', 60) : config('auth.passwords.users.expire');
+        foreach ([$message->getHtmlBody(), $message->getTextBody()] as $body) {
+            $this->assertStringContainsString('Luanti-Portal', $body);
+            $this->assertStringContainsString('ab Anforderung '.$minutes.' Minuten gültig', $body);
+            $this->assertStringContainsString($isVerification ? 'Du hast kein Konto angelegt?' : 'Du hast kein neues Passwort angefordert?', $body);
+            $this->assertStringNotContainsString('Hello!', $body);
+            $this->assertStringNotContainsString('Regards,', $body);
+        }
+        $this->assertStringContainsString('Funktioniert der Button nicht?', $message->getHtmlBody());
     }
 
     private function assertMailLinksAreCanonical(Email $message, string $url): void

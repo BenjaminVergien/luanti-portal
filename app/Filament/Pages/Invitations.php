@@ -9,11 +9,14 @@ use App\Services\PortalAccess;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
+use Filament\Notifications\Notification;
 use Filament\Schemas\Schema;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
 
 class Invitations extends AccessTablePage
 {
@@ -27,12 +30,12 @@ class Invitations extends AccessTablePage
             Action::make('invite')->label('Zur Einrichtung einladen')
                 ->schema([$this->organizationField(), TextInput::make('email')->label('E-Mail-Adresse')->email()->required(), $this->membershipRoleField()])
                 ->action(function (array $data, Schema $schema): void {
-                    $this->sendInvitation($schema, fn (): Invitation => app(PortalAccess::class)->invite($this->actor(), $data['email'], $this->organizationFromData($data), MembershipRole::from($data['membership_role'])), 'Einladung versendet');
+                    $this->sendInvitation($schema, fn (): Invitation => app(PortalAccess::class)->invite($this->actor(), $data['email'], $this->organizationFromData($data), MembershipRole::from($data['membership_role'])), 'Einladung zum Versand übergeben');
                 }),
             Action::make('inviteInternal')->label('Interne Rolle einladen')->visible(fn (): bool => $this->isInternalPanel() && $this->actor()->isGlobalAdmin())
                 ->schema([TextInput::make('email')->label('E-Mail-Adresse')->email()->required(), Select::make('internal_role')->label('Interne Rolle')->options(InternalRole::options())->required()])
                 ->action(function (array $data, Schema $schema): void {
-                    $this->sendInvitation($schema, fn (): Invitation => app(PortalAccess::class)->invite($this->actor(), $data['email'], internalRole: InternalRole::from($data['internal_role'])), 'Interne Einladung versendet');
+                    $this->sendInvitation($schema, fn (): Invitation => app(PortalAccess::class)->invite($this->actor(), $data['email'], internalRole: InternalRole::from($data['internal_role'])), 'Interne Einladung zum Versand übergeben');
                 }),
         ];
     }
@@ -47,9 +50,17 @@ class Invitations extends AccessTablePage
                 $errors[$schema->getStatePath().'.'.$field] = $messages;
             }
             throw ValidationException::withMessages($errors);
+        } catch (TransportExceptionInterface $exception) {
+            Log::warning('Portal invitation mail submission failed.', ['exception_type' => $exception::class]);
+
+            throw ValidationException::withMessages([
+                $schema->getStatePath().'.email' => 'Die Einladung konnte nicht sicher zum Versand übergeben werden. Der Einladungslink wurde vorsorglich deaktiviert. Bitte versuche es später erneut. Besteht das Problem weiter, wende dich an die Portalverwaltung.',
+            ]);
         }
 
-        $this->saved($successMessage);
+        Notification::make()->title($successMessage)
+            ->body('Die E-Mail wurde zum Versand angenommen. Das bestätigt noch nicht die Zustellung. Bitte auch den Spamordner prüfen.')
+            ->success()->send();
     }
 
     public function table(Table $table): Table

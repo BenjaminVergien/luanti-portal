@@ -7,8 +7,14 @@ Du wurdest zur Einrichtung {!! $invitation->organization->name !!} als {!! $invi
 Du wurdest als {!! $invitation->internal_role->label() !!} eingeladen.
 @endif
 
+Diese Einladung ist für {!! $invitation->email !!} bestimmt.
+
 Melde dich mit der eingeladenen E-Mail-Adresse an oder registriere dich zuerst. Bestätige anschließend deine E-Mail-Adresse und nimm die Einladung an.
 
 Einladung öffnen: {!! $acceptUrl !!}
 
-Die Einladung gilt bis {!! $invitation->expires_at->format('d.m.Y H:i') !!} Uhr (Europe/Berlin).
+Die Einladung gilt bis {!! $invitation->expires_at->timezone('Europe/Berlin')->format('d.m.Y H:i') !!} Uhr (Europe/Berlin).
+
+Du erwartest keine Einladung? Dann kannst du diese E-Mail ignorieren. Ohne deine Annahme wird keine Mitgliedschaft oder interne Rolle vergeben.
+
+Bitte teile diesen persönlichen Link nicht mit anderen.

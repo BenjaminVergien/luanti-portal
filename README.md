@@ -95,6 +95,10 @@ bootstrap once an active global admin exists. Further internal roles use invitat
 
 ## Development and deployment
 
+See [DEPLOYMENT.md](DEPLOYMENT.md) for a manual fresh production installation
+alongside Foundry on an Ubuntu VM, local Postfix or external SMTP setup, background services,
+acceptance checks, backups and rollback. No installer script is required.
+
 See [DEVELOPMENT.md](DEVELOPMENT.md) for fresh-clone setup, portable Windows
 commands, local defaults and the development-only template migration reset.
 The installed package versions are pinned in the lockfiles; the current local

@@ -7,9 +7,9 @@ use App\Filament\Pages\Accounts;
 use App\Filament\Pages\CreateAccount;
 use App\Filament\Pages\EditAccount;
 use App\Models\User;
+use App\Notifications\PortalVerifyEmail;
 use App\Services\PortalAccess;
 use Filament\Actions\Testing\TestAction;
-use Filament\Auth\Notifications\VerifyEmail;
 use Filament\Auth\Pages\EmailVerification\EmailVerificationPrompt;
 use Filament\Facades\Filament;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -67,7 +67,7 @@ class AccountManagementInterfaceTest extends TestCase
         $this->assertFalse($user->hasVerifiedEmail());
         $this->assertNull($user->internal_role);
         $this->assertTrue(Hash::check('Safe-Account-Password!', $user->password));
-        Notification::assertNotSentTo($user, VerifyEmail::class);
+        Notification::assertNotSentTo($user, PortalVerifyEmail::class);
     }
 
     public function test_admin_created_unverified_user_can_request_and_complete_normal_email_verification(): void
@@ -82,7 +82,7 @@ class AccountManagementInterfaceTest extends TestCase
 
         Livewire::test(EmailVerificationPrompt::class)->callAction('resendNotification')->assertHasNoActionErrors();
         $url = null;
-        Notification::assertSentTo($user, VerifyEmail::class, function (VerifyEmail $notification) use (&$url): bool {
+        Notification::assertSentTo($user, PortalVerifyEmail::class, function (PortalVerifyEmail $notification) use (&$url): bool {
             $url = $notification->url;
 
             return filled($url);

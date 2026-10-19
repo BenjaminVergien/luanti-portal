@@ -51,9 +51,11 @@ class PortalInvitationTest extends TestCase
         $xpath = new DOMXPath($document);
 
         $this->assertSame(0, $xpath->query('//img | //script | //iframe | //object | //form')->length);
-        $this->assertSame(1, $xpath->query('//a')->length);
+        $this->assertSame(2, $xpath->query('//a')->length);
         $this->assertSame($url, $xpath->query('//a')->item(0)->getAttribute('href'));
         $this->assertSame('Einladung öffnen', $xpath->query('//a')->item(0)->textContent);
+        $this->assertSame($url, $xpath->query('//a')->item(1)->getAttribute('href'));
+        $this->assertSame($url, $xpath->query('//a')->item(1)->textContent);
         $this->assertSame(2, $xpath->query('//strong')->length);
         $this->assertSame($name, $xpath->query('//strong')->item(0)->textContent);
         $this->assertSame(0, $xpath->query('//em | //del | //hr | //h2 | //h3')->length);
@@ -85,7 +87,7 @@ class PortalInvitationTest extends TestCase
         $mail->assertSeeInHtml($organization->name);
         $mail->assertSeeInHtml($label);
         $mail->assertSeeInText("Du wurdest zur Einrichtung {$organization->name} als {$label} eingeladen.");
-        foreach (['Melde dich mit der eingeladenen E-Mail-Adresse an', 'Bestätige anschließend deine E-Mail-Adresse', '16.10.2026 18:30 Uhr (Europe/Berlin).'] as $content) {
+        foreach (['Melde dich mit der eingeladenen E-Mail-Adresse an', 'Bestätige anschließend deine E-Mail-Adresse', '16.10.2026 18:30 Uhr (Europe/Berlin).', 'Du erwartest keine Einladung?', 'Bitte teile diesen persönlichen Link nicht mit anderen.'] as $content) {
             $mail->assertSeeInHtml($content);
             $mail->assertSeeInText($content);
         }

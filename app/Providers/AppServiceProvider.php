@@ -5,9 +5,13 @@ namespace App\Providers;
 use App\Http\Middleware\EnsurePortalAccount;
 use App\Http\Responses\PortalLoginResponse;
 use App\Http\Responses\PortalRegistrationResponse;
+use App\Notifications\PortalResetPassword;
+use App\Notifications\PortalVerifyEmail;
 use App\Services\CanonicalUrl;
 use Filament\Auth\Http\Responses\Contracts\LoginResponse;
 use Filament\Auth\Http\Responses\Contracts\RegistrationResponse;
+use Filament\Auth\Notifications\ResetPassword;
+use Filament\Auth\Notifications\VerifyEmail;
 use Illuminate\Auth\Middleware\EnsureEmailIsVerified;
 use Illuminate\Foundation\Console\ServeCommand;
 use Illuminate\Foundation\DevCommands;
@@ -24,6 +28,8 @@ class AppServiceProvider extends ServiceProvider
     {
         $this->app->bind(LoginResponse::class, PortalLoginResponse::class);
         $this->app->bind(RegistrationResponse::class, PortalRegistrationResponse::class);
+        $this->app->bind(VerifyEmail::class, PortalVerifyEmail::class);
+        $this->app->bind(ResetPassword::class, PortalResetPassword::class);
     }
 
     /**

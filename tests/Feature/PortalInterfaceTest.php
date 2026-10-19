@@ -19,17 +19,19 @@ use App\Models\JoinRequest;
 use App\Models\Organization;
 use App\Models\OrganizationMembership;
 use App\Models\User;
+use App\Notifications\PortalVerifyEmail;
 use App\Services\PortalAccess;
 use Filament\Actions\Testing\TestAction;
-use Filament\Auth\Notifications\VerifyEmail;
 use Filament\Auth\Pages\Login;
 use Filament\Facades\Filament;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\HtmlString;
 use Livewire\Livewire;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Symfony\Component\Mailer\Exception\TransportException;
 use Tests\TestCase;
 
 class PortalInterfaceTest extends TestCase
@@ -79,7 +81,7 @@ class PortalInterfaceTest extends TestCase
         $this->assertNull($user->email_verified_at);
         $this->assertTrue($user->is_active);
         $this->assertSame(0, $user->memberships()->count());
-        Notification::assertSentTo($user, VerifyEmail::class);
+        Notification::assertSentTo($user, PortalVerifyEmail::class);
     }
 
     public function test_registration_rejects_duplicate_email_case_variants(): void
@@ -462,6 +464,49 @@ class PortalInterfaceTest extends TestCase
 
         $this->assertDatabaseCount('invitations', 1);
         Mail::assertSent(PortalInvitation::class, 1);
+    }
+
+    /** @return array<string, array{bool}> */
+    public static function failedInvitationActions(): array
+    {
+        return ['organization invitation' => [false], 'internal invitation' => [true]];
+    }
+
+    #[DataProvider('failedInvitationActions')]
+    public function test_invitation_smtp_failure_is_actionable_revokes_the_link_and_keeps_quotas(bool $internal): void
+    {
+        config(['invitations.limits.actor_per_minute' => 1]);
+        $this->panel($internal ? User::factory()->globalAdmin()->create() : $this->manager, $internal ? 'admin' : 'portal');
+        Log::spy();
+        Mail::shouldReceive('to')->once()->andReturnSelf();
+        Mail::shouldReceive('send')->once()->andThrow(new TransportException('SMTP secret: private-password smtp.private.example'));
+        $action = $internal ? 'inviteInternal' : 'invite';
+        $data = $internal ? ['email' => 'recipient@example.test', 'internal_role' => 'caseworker']
+            : ['email' => 'recipient@example.test', 'membership_role' => 'staff'];
+
+        $page = Livewire::test(Invitations::class)->callAction($action, $data)->assertHasActionErrors(['email']);
+        $html = $page->getMountedActionModalHtml();
+        $this->assertStringContainsString('Bitte versuche es später erneut', $html);
+        $this->assertStringContainsString('vorsorglich deaktiviert', $html);
+        $this->assertStringNotContainsString('private-password', $html);
+        $this->assertStringNotContainsString('smtp.private.example', $html);
+        $this->assertNotNull(Invitation::query()->sole()->revoked_at);
+        Log::shouldHaveReceived('warning')->once()->with('Portal invitation mail submission failed.', ['exception_type' => TransportException::class]);
+
+        $page->setActionData($data)->call('callMountedAction')->assertHasActionErrors(['email']);
+        $this->assertStringContainsString('Versandlimit', $page->getMountedActionModalHtml());
+        $this->assertDatabaseCount('invitations', 1);
+    }
+
+    public function test_onboarding_help_is_visible_on_registration_verification_and_organization_home(): void
+    {
+        $this->get('/portal/register')->assertOk()->assertSee('Teilnehmende benötigen nur einen Spielaccount');
+        $this->actingAs(User::factory()->unverified()->create());
+        $this->get('/portal/email-verification/prompt')->assertOk()->assertSee('Spamordner')->assertSee('eine neue Bestätigungs-E-Mail anfordern');
+
+        $this->panel($this->staff);
+        Livewire::test(OrganizationHome::class)->assertSee('Welt beantragen:')->assertSee('Genehmigung abwarten:')
+            ->assertSee('Spielaccounts anlegen:')->assertSee('Gemeinsam spielen:')->assertActionHidden('rename');
     }
 
     public function test_manager_can_rename_only_current_organization(): void
