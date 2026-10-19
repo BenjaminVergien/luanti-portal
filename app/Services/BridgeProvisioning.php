@@ -19,8 +19,11 @@ class BridgeProvisioning
 {
     public function __construct(private PortalSettings $settings, private GithubBridgeSource $source, private LuantiDockerInstallation $engine, private LuantiSshClient $ssh) {}
 
-    /** @return array{configuration: array<string, mixed>, commit: string}|null */
-    public function prepare(User $actor): ?array
+    /**
+     * @param  list<array{template_id: string, name: string, revision: string, bundle_sha256: string, is_selectable: bool}>|null  $templates
+     * @return array{configuration: array<string, mixed>, commit: string}|null
+     */
+    public function prepare(User $actor, ?array $templates = null): ?array
     {
         Gate::forUser($actor)->authorize('create', LuantiServer::class);
         $settings = $this->settings->bridge();
@@ -30,7 +33,7 @@ class BridgeProvisioning
         if ($this->settings->luantiDockerImage() === null) {
             throw ValidationException::withMessages(['bridge' => 'Für die automatische Bridge-Installation bitte ein Luanti-Image auswählen.']);
         }
-        $templates = app(PortalWorldTemplates::class)->snapshot();
+        $templates ??= app(PortalWorldTemplates::class)->snapshot();
         $game = $this->source->game($settings['bridge_game_source'] ?? '');
         $commit = $this->source->resolve($settings['bridge_repository'], $settings['bridge_ref']);
         $bundle = $this->source->bundle($settings['bridge_repository'], $commit);

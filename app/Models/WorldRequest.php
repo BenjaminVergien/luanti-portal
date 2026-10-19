@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 #[Fillable(['name', 'luanti_world_template_id', 'start_date', 'end_date', 'participant_count'])]
 class WorldRequest extends Model
@@ -19,7 +20,8 @@ class WorldRequest extends Model
     protected function casts(): array
     {
         return ['start_date' => 'date:Y-m-d', 'end_date' => 'date:Y-m-d', 'participant_count' => 'integer',
-            'status' => WorldRequestStatus::class, 'decided_at' => 'datetime', 'revision' => 'integer', 'approved_access' => 'array'];
+            'status' => WorldRequestStatus::class, 'decided_at' => 'datetime', 'revision' => 'integer', 'approved_access' => 'array',
+            'template_snapshot' => 'array', 'provisioning_configuration' => 'array'];
     }
 
     public function organization(): BelongsTo
@@ -50,6 +52,11 @@ class WorldRequest extends Model
     public function gameInstances(): HasMany
     {
         return $this->hasMany(LuantiGameInstance::class);
+    }
+
+    public function provisionedServer(): HasOne
+    {
+        return $this->hasOne(LuantiServer::class)->withTrashed();
     }
 
     public function latestGameInstance(): ?LuantiGameInstance

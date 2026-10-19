@@ -74,7 +74,7 @@ class LuantiServerRegistry
             if ($server->hetzner_reference !== null) {
                 $server->templates()->update(['is_available' => false]);
                 $server->templates()->whereDoesntHave('worldRequests')->whereDoesntHave('gameInstances')->delete();
-                if ($server->templates()->exists() || $server->gameInstances()->exists()) {
+                if ($server->world_request_id !== null || $server->templates()->exists() || $server->gameInstances()->exists()) {
                     $server->delete();
 
                     return;

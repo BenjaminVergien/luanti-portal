@@ -2,10 +2,12 @@
 
 namespace App\Services;
 
+use App\Enums\WorldRequestStatus;
 use App\Jobs\CleanupLuantiDns;
 use App\Jobs\ProvisionLuantiBridge;
 use App\Models\LuantiServer;
 use App\Models\User;
+use App\Models\WorldRequest;
 use Closure;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
@@ -62,7 +64,7 @@ class HetznerVirtualMachines
     }
 
     /** @param array{name?: mixed, server_type?: mixed, location?: mixed, image?: mixed} $data */
-    public function create(User $actor, array $data): LuantiServer
+    public function create(User $actor, array $data, ?WorldRequest $worldRequest = null): LuantiServer
     {
         Gate::forUser($this->access->currentUser($actor))->authorize('create', LuantiServer::class);
         $this->http->assertConfigured();
@@ -84,9 +86,24 @@ class HetznerVirtualMachines
         if ($luantiImage !== null && $data['image'] !== 'ubuntu-24.04') {
             throw ValidationException::withMessages(['image' => 'Die automatische Luanti-Installation benötigt derzeit Ubuntu 24.04.']);
         }
-        $bridge = app(BridgeProvisioning::class)->prepare($actor);
+        if ($worldRequest !== null) {
+            $worldRequest = $worldRequest->fresh();
+            if ($worldRequest->status !== WorldRequestStatus::Approved || $worldRequest->approved_access !== null
+                || $worldRequest->template_snapshot === null || $worldRequest->provisionedServer !== null) {
+                throw ValidationException::withMessages(['provisioning' => 'Der Weltantrag ist nicht für eine neue VM freigegeben.']);
+            }
+            $templates = array_values(array_filter(app(PortalWorldTemplates::class)->snapshot(),
+                fn (array $entry): bool => $entry['template_id'] !== $worldRequest->template_snapshot['template_id']));
+            $templates[] = [...$worldRequest->template_snapshot, 'is_selectable' => true];
+            $bridge = app(BridgeProvisioning::class)->prepare($actor, $templates);
+            if ($bridge === null) {
+                throw ValidationException::withMessages(['provisioning' => 'Die automatische Bridge-Installation muss aktiviert sein.']);
+            }
+        } else {
+            $bridge = app(BridgeProvisioning::class)->prepare($actor);
+        }
 
-        return $this->withLock('create:'.$data['name'], function () use ($actor, $data, $luantiImage, $bridge): LuantiServer {
+        return $this->withLock('create:'.$data['name'], function () use ($actor, $data, $luantiImage, $bridge, $worldRequest): LuantiServer {
             Gate::forUser($this->access->currentUser($actor))->authorize('create', LuantiServer::class);
             if (LuantiServer::withTrashed()->where('hetzner_name', $data['name'])->exists()) {
                 throw ValidationException::withMessages(['name' => 'Für diesen VM-Namen besteht bereits ein Eintrag. Bitte dessen Status aktualisieren.']);
@@ -94,6 +111,7 @@ class HetznerVirtualMachines
             $https = app(HetznerDns::class)->prepare($data['name']);
             $server = new LuantiServer(['name' => $data['name'], 'game_port' => 30000]);
             $server->forceFill([
+                'world_request_id' => $worldRequest?->id,
                 'public_hostname' => $https === null ? null : $https['label'].'.'.$https['zone_name'],
                 'domain' => $https === null ? null : $https['label'].'.'.$https['zone_name'],
                 'public_https_configuration' => $https, 'dns_status' => $https === null ? null : 'pending',

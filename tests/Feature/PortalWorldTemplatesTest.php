@@ -171,7 +171,7 @@ class PortalWorldTemplatesTest extends TestCase
         $library->snapshot();
     }
 
-    public function test_library_is_admin_only_and_templates_require_a_commissioned_server_before_requesting(): void
+    public function test_library_management_is_admin_only_but_members_can_request_templates_without_a_server(): void
     {
         $library = app(PortalWorldTemplates::class);
         $path = $this->archive();
@@ -184,10 +184,13 @@ class PortalWorldTemplatesTest extends TestCase
         $source = $library->import(User::factory()->globalAdmin()->create(), $path);
         $request = WorldRequest::factory()->create();
         OrganizationMembership::factory()->create(['organization_id' => $request->organization_id, 'user_id' => $request->user_id]);
-        $this->assertArrayNotHasKey($source->id, app(WorldRequests::class)->worldOptions($request->applicant, $request->organization));
-        $this->expectException(ValidationException::class);
-        app(WorldRequests::class)->create($request->applicant, $request->organization,
-            [...$request->only(['name', 'start_date', 'end_date', 'participant_count']), 'luanti_world_template_id' => $source->id]);
+        $this->assertArrayHasKey($source->id, app(WorldRequests::class)->worldOptions($request->applicant, $request->organization));
+        $submitted = app(WorldRequests::class)->create($request->applicant, $request->organization,
+            [...$request->only(['name', 'participant_count']), 'start_date' => $request->start_date->toDateString(),
+                'end_date' => $request->end_date->toDateString(), 'luanti_world_template_id' => $source->id]);
+        $this->assertSame($source->revision, $submitted->template_snapshot['revision']);
+        $this->assertNull($submitted->world->luanti_server_id);
+        Http::assertNothingSent();
     }
 
     public function test_admin_can_upload_and_edit_library_metadata_without_changing_its_identity(): void

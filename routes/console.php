@@ -1,8 +1,11 @@
 <?php
 
+use App\Enums\WorldRequestStatus;
 use App\Jobs\CleanupLuantiDns;
 use App\Jobs\ProvisionLuantiBridge;
+use App\Jobs\ProvisionWorldRequest;
 use App\Models\LuantiServer;
+use App\Models\WorldRequest;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -10,6 +13,11 @@ use Illuminate\Support\Facades\Schedule;
 
 Schedule::command('luanti:accounts:recover')->everyMinute()->withoutOverlapping();
 Schedule::command('luanti:games:reconcile')->everyMinute()->withoutOverlapping();
+Schedule::call(function (): void {
+    WorldRequest::query()->where('status', WorldRequestStatus::Approved)->whereNull('approved_access')
+        ->whereNotNull('provisioning_configuration')->whereNull('provisioning_error')
+        ->each(fn (WorldRequest $request) => ProvisionWorldRequest::dispatch($request->id));
+})->name('world-request-provisioning-recovery')->everyMinute()->withoutOverlapping();
 Schedule::call(function (): void {
     LuantiServer::query()->whereIn('bridge_status', ['pending', 'installing'])
         ->whereNotIn('hetzner_status', ['deleted', 'deleting', 'create_failed', 'key_pending'])

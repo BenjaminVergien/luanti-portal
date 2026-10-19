@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\WorldRequestStatus;
+use App\Jobs\ProvisionWorldRequest;
 use App\Models\LuantiServer;
 use App\Models\LuantiWorldTemplate;
 use App\Models\Organization;
@@ -26,7 +27,7 @@ class WorldRequests
     {
         Gate::forUser($this->access->currentUser($actor))->authorize('viewAny', [WorldRequest::class, $organization]);
 
-        return WorldRequest::query()->with(['organization', 'applicant', 'world.server', 'decisionMaker', 'currentGameInstance', 'gameInstances'])
+        return WorldRequest::query()->with(['organization', 'applicant', 'world.server', 'decisionMaker', 'currentGameInstance', 'gameInstances', 'provisionedServer'])
             ->when($organization !== null, fn (Builder $query): Builder => $query->where('organization_id', $organization->id));
     }
 
@@ -39,11 +40,14 @@ class WorldRequests
             abort_if($organization !== null && $request->organization_id !== $organization->id, 404);
         }
 
-        return LuantiWorldTemplate::query()->with('server')->whereNotNull('luanti_server_id')
-            ->where(fn (Builder $query): Builder => $query->where(fn (Builder $query): Builder => $query->where('is_selectable', true)->where('is_available', true))
+        return LuantiWorldTemplate::query()->with('server')
+            ->where(fn (Builder $query): Builder => $query->where(fn (Builder $query): Builder => $query->where('is_selectable', true)->where('is_available', true)
+                ->where(fn (Builder $source): Builder => $source->whereNotNull('library_identifier')
+                    ->orWhere(fn (Builder $legacy): Builder => $legacy->whereNotNull('luanti_server_id')->whereNull('bundle_sha256'))))
                 ->when($request !== null, fn (Builder $query): Builder => $query->orWhereKey($request->luanti_world_template_id)))
             ->orderBy('name')->get()->mapWithKeys(fn (LuantiWorldTemplate $world): array => [
-                $world->id => $world->name.' ('.$world->server->name.')'.($world->is_selectable && $world->is_available ? '' : ' – Nicht mehr beantragbar'),
+                $world->id => $world->name.($world->server === null ? '' : ' ('.$world->server->name.')')
+                    .($world->is_selectable && $world->is_available ? '' : ' – Nicht mehr beantragbar'),
             ])->all();
     }
 
@@ -58,7 +62,8 @@ class WorldRequests
             $this->checkWorld($attributes['luanti_world_template_id'], requireSelectable: true);
             $request = new WorldRequest($attributes);
             $request->forceFill(['organization_id' => $organization->id, 'user_id' => $actor->id,
-                'status' => WorldRequestStatus::Pending, 'revision' => 1])->save();
+                'status' => WorldRequestStatus::Pending, 'revision' => 1,
+                'template_snapshot' => $this->templateSnapshot($attributes['luanti_world_template_id'])])->save();
 
             return $request;
         });
@@ -71,6 +76,9 @@ class WorldRequests
             $request = WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
             Gate::forUser($this->access->currentUser($actor))->authorize('update', $request);
             $this->checkRevision($request, $expectedRevision);
+            if ($request->provisioning_configuration !== null && $request->approved_access === null) {
+                throw ValidationException::withMessages(['revision' => 'Der Server wird bereits bereitgestellt. Bitte die Einrichtung zuerst abschließen.']);
+            }
             $attributes = $this->validate($data, $request);
             $worldChanged = (int) $attributes['luanti_world_template_id'] !== $request->luanti_world_template_id;
             $datesChanged = $attributes['start_date'] !== $request->start_date->toDateString()
@@ -80,6 +88,9 @@ class WorldRequests
                 throw ValidationException::withMessages(['luanti_world_template_id' => 'Bitte die Aktion Weltvorlage wechseln verwenden.']);
             }
             $request->fill($attributes);
+            if ($worldChanged) {
+                $request->forceFill(['template_snapshot' => $this->templateSnapshot($attributes['luanti_world_template_id'])]);
+            }
             if ($request->status === WorldRequestStatus::Approved && $datesChanged) {
                 $request->forceFill(['status' => WorldRequestStatus::Pending, 'decided_by' => null, 'decided_at' => null]);
             }
@@ -87,8 +98,15 @@ class WorldRequests
         });
     }
 
-    public function decide(User $actor, WorldRequest $request, bool $approve, int $expectedRevision): void
+    /** @param array<string, mixed> $provisioning */
+    public function decide(User $actor, WorldRequest $request, bool $approve, int $expectedRevision, array $provisioning = []): void
     {
+        Gate::forUser($this->access->currentUser($actor))->authorize('decide', $request);
+        if ($request->fresh()->world->luanti_server_id === null) {
+            $this->decideLibraryRequest($actor, $request, $approve, $expectedRevision, $provisioning);
+
+            return;
+        }
         try {
             $serverId = $request->fresh()->world->luanti_server_id;
             Cache::lock('luanti:server:'.$serverId, 120)->block(15, function () use ($actor, $request, $approve, $expectedRevision, $serverId): void {
@@ -131,6 +149,32 @@ class WorldRequests
         }
     }
 
+    /** @param array<string, mixed> $provisioning */
+    private function decideLibraryRequest(User $actor, WorldRequest $request, bool $approve, int $expectedRevision, array $provisioning): void
+    {
+        DB::transaction(function () use ($actor, $request, $approve, $expectedRevision, $provisioning): void {
+            $request = WorldRequest::query()->whereKey($request->id)->lockForUpdate()->firstOrFail();
+            $actor = $this->access->currentUser($actor);
+            Gate::forUser($actor)->authorize('decide', $request);
+            $this->checkRevision($request, $expectedRevision);
+            $configuration = null;
+            if ($approve) {
+                $this->checkWorld($request->luanti_world_template_id, requireSelectable: true);
+                if ($request->template_snapshot === null) {
+                    throw ValidationException::withMessages(['provisioning' => 'Die angeforderte Vorlagenversion fehlt. Bitte den Antrag erneut bearbeiten.']);
+                }
+                app(PortalWorldTemplates::class)->artifact($request->template_snapshot['bundle_sha256']);
+                $configuration = app(WorldRequestProvisioning::class)->configuration($actor, $provisioning);
+            }
+            $request->forceFill(['status' => $approve ? WorldRequestStatus::Approved : WorldRequestStatus::Rejected,
+                'decided_by' => $actor->id, 'decided_at' => now(), 'revision' => $request->revision + 1,
+                'provisioning_configuration' => $configuration, 'provisioning_error' => null])->save();
+            if ($approve) {
+                ProvisionWorldRequest::dispatch($request->id)->afterCommit();
+            }
+        });
+    }
+
     public function changeTemplate(User $actor, WorldRequest $request, int $templateId, int $expectedRevision): void
     {
         Cache::lock('luanti:accounts:process:'.$request->id, 120)->block(15, function () use ($actor, $request, $templateId, $expectedRevision): void {
@@ -166,9 +210,23 @@ class WorldRequests
     private function checkWorld(int|string $worldId, bool $requireSelectable): void
     {
         $world = LuantiWorldTemplate::query()->whereKey($worldId)->lockForUpdate()->first();
-        if ($world === null || $world->luanti_server_id === null || ($requireSelectable && (! $world->is_selectable || ! $world->is_available))) {
+        if ($world === null || ($world->luanti_server_id === null && $world->library_identifier === null)
+            || ($requireSelectable && (! $world->is_selectable || ! $world->is_available))) {
             throw ValidationException::withMessages(['luanti_world_template_id' => 'Bitte wähle eine aktuell beantragbare Welt.']);
         }
+    }
+
+    /** @return array{template_id: string, name: string, revision: string, bundle_sha256: string}|null */
+    private function templateSnapshot(int|string $worldId): ?array
+    {
+        $template = LuantiWorldTemplate::query()->findOrFail($worldId);
+        if ($template->library_identifier === null) {
+            return null;
+        }
+        app(PortalWorldTemplates::class)->artifact($template->bundle_sha256);
+
+        return ['template_id' => $template->template_identifier, 'name' => $template->name,
+            'revision' => $template->revision, 'bundle_sha256' => $template->bundle_sha256];
     }
 
     /**

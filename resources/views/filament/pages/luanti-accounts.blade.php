@@ -3,7 +3,7 @@
         <div class="fi-prose">
             <p>Spielaccounts sind eigenständige Luanti-Zugänge. Sie benötigen keine E-Mail-Adresse und erhalten keinen Zugang zum Verwaltungsportal.</p>
             <p><strong>Einrichtung:</strong> {{ $worldRequest->organization->name }}<br>
-                <strong>Aktueller Antrag:</strong> {{ $worldRequest->world->name }} / {{ $worldRequest->world->server->name }},
+                <strong>Aktueller Antrag:</strong> {{ $worldRequest->world->name }} / {{ $worldRequest->world->server?->name ?? 'Server wird bereitgestellt' }},
                 {{ $worldRequest->start_date->format('d.m.Y') }} bis einschließlich {{ $worldRequest->end_date->format('d.m.Y') }}.</p>
             @if ($approvedWorld)
                 <p><strong>Zuletzt genehmigter Stand:</strong> {{ $approvedWorld->label() }} / {{ $approvedWorld->server->name }}, {{ $approvedWindow }}.</p>
@@ -20,7 +20,7 @@
         </div>
     </x-filament::section>
 
-    @if ($worldRequest->status === \App\Enums\WorldRequestStatus::Approved)
+    @if ($worldRequest->status === \App\Enums\WorldRequestStatus::Approved && $approvedWorld)
         <form wire:submit="save" class="fi-sc-form">
             {{ $this->form }}
 
@@ -28,6 +28,13 @@
                 <x-filament::button type="submit" wire:target="save">Anlegen und übertragen</x-filament::button>
             </x-filament::actions>
         </form>
+    @elseif ($worldRequest->status === \App\Enums\WorldRequestStatus::Approved)
+        <x-filament::section heading="Spielserver wird bereitgestellt">
+            Dein Antrag ist genehmigt. Sobald Server und private Spielinstanz bereit sind, kannst du hier Spielaccounts anlegen.
+            @if ($worldRequest->provisioning_error)
+                <p>{{ $worldRequest->provisioning_error }}</p>
+            @endif
+        </x-filament::section>
     @else
         <x-filament::section heading="Aktueller Antrag nicht genehmigt">
             Neue Spielaccounts können nach Genehmigung des aktuellen Antrags angelegt werden. Bisherige Accounts und bestätigte Zugänge bleiben unten sichtbar.

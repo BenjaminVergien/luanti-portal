@@ -535,6 +535,22 @@ multiple copies of this schedule or use the local `dev.ps1` stack in production.
 
 ## 6. Hosted acceptance checklist
 
+Import the published world ZIPs in **Luanti-Weltvorlagen** before onboarding.
+Educators request a template from the portal library without needing an existing
+game server. A global administrator approves the request and confirms the paid
+VM configuration (defaults: `cx23`, `nbg1`, Ubuntu 24.04). Luanti image, bridge,
+GitHub access, game source and Hetzner access must be configured beforehand.
+The queue creates one VM per approved library request; the minute scheduler
+recovers provisioning and connects the confirmed template to its private game
+instance. The requested template revision is retained even if the library changes.
+Caseworkers can review and reject requests; paid VM approval requires a global
+administrator. The approved game window stops the game, but the VM remains
+billable until an administrator deletes it.
+
+If provisioning fails, inspect the existing server entry and use **Serverbereitstellung
+erneut prüfen** on the request. Existing VMs are reused, including recovery after
+an uncertain creation response. A deleted VM is never silently replaced.
+
 Use accounts/inboxes you control; check at least two external recipient domains.
 Do not invite the interested parties until this checklist passes.
 
@@ -561,7 +577,9 @@ Do not invite the interested parties until this checklist passes.
 - [ ] Configure a real bridge/game server and published template. The
   development-only `https://localhost:18443` tunnel is not a hosted endpoint.
   Verify the HTTPS API connection and actual game host/UDP port separately.
-- [ ] Request a world, approve it internally, wait for a running private instance,
+- [ ] Request a library template as an educator/manager without an existing game
+  server. Approve it as a global administrator, check the paid VM confirmation,
+  and wait for automatic server provisioning and a running private instance;
   create participant/facilitator game accounts, wait for confirmed transmission,
   and log in through a real Luanti client with both roles.
 - [ ] Verify out-of-window access is denied and a stopped game's save remains.

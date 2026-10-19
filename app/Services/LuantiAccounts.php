@@ -55,6 +55,9 @@ class LuantiAccounts
             if ($request->status !== WorldRequestStatus::Approved) {
                 throw ValidationException::withMessages(['accounts' => 'Neue Spielaccounts benötigen einen genehmigten Weltantrag.']);
             }
+            if ($request->world->luanti_server_id === null) {
+                throw ValidationException::withMessages(['accounts' => 'Der Server und die private Spielinstanz werden noch bereitgestellt.']);
+            }
             $snapshot = $request->approved_access ?? $this->snapshot($request);
             if ($snapshot['instance_id'] === null) {
                 throw ValidationException::withMessages(['accounts' => 'Die private Spielinstanz wird noch vorbereitet.']);
@@ -172,7 +175,7 @@ class LuantiAccounts
         DB::transaction(function () use ($requestId): void {
             $request = WorldRequest::query()->whereKey($requestId)->lockForUpdate()->firstOrFail();
             $desired = $request->approved_access;
-            if ($desired === null && $request->status === WorldRequestStatus::Approved) {
+            if ($desired === null && $request->status === WorldRequestStatus::Approved && $request->world->luanti_server_id !== null) {
                 $desired = $this->snapshot($request);
                 $request->forceFill(['approved_access' => $desired])->save();
             }
