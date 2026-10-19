@@ -565,6 +565,11 @@ Do not invite the interested parties until this checklist passes.
   create participant/facilitator game accounts, wait for confirmed transmission,
   and log in through a real Luanti client with both roles.
 - [ ] Verify out-of-window access is denied and a stopped game's save remains.
+- [ ] On a disposable test VM, verify that deletion requires the exact server
+  name and warns about losing game worlds and player progress. Wait for confirmed
+  VM deletion and completed DNS cleanup, then remove its portal entry. Unused
+  server template copies should disappear; existing requests and game history,
+  and the original template ZIPs in the portal library, must remain readable.
 
 An SMTP-accepted message can still be delayed, bounced or filtered later.
 Verification/reset emails use the queue; invitations are submitted synchronously

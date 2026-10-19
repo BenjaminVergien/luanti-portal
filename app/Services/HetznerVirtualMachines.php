@@ -33,7 +33,7 @@ class HetznerVirtualMachines
             'fox', 'grove', 'heron', 'hill', 'lake', 'lark', 'lynx', 'maple', 'moss', 'otter', 'owl', 'pine', 'pond', 'reed', 'robin', 'spruce', 'vale', 'wren'];
         for ($attempt = 0; $attempt < 100; $attempt++) {
             $name = $adjectives[random_int(0, count($adjectives) - 1)].'-'.$nouns[random_int(0, count($nouns) - 1)];
-            if (! LuantiServer::query()->where('hetzner_name', $name)->exists()) {
+            if (! LuantiServer::withTrashed()->where('hetzner_name', $name)->exists()) {
                 return $name;
             }
         }
@@ -88,7 +88,7 @@ class HetznerVirtualMachines
 
         return $this->withLock('create:'.$data['name'], function () use ($actor, $data, $luantiImage, $bridge): LuantiServer {
             Gate::forUser($this->access->currentUser($actor))->authorize('create', LuantiServer::class);
-            if (LuantiServer::query()->where('hetzner_name', $data['name'])->exists()) {
+            if (LuantiServer::withTrashed()->where('hetzner_name', $data['name'])->exists()) {
                 throw ValidationException::withMessages(['name' => 'Für diesen VM-Namen besteht bereits ein Eintrag. Bitte dessen Status aktualisieren.']);
             }
             $https = app(HetznerDns::class)->prepare($data['name']);

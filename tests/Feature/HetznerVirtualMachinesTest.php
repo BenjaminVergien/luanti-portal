@@ -269,6 +269,24 @@ class HetznerVirtualMachinesTest extends TestCase
         Http::assertSentCount(3);
     }
 
+    public function test_vm_creation_reports_a_validation_error_for_a_name_retained_in_deleted_server_history(): void
+    {
+        $admin = User::factory()->globalAdmin()->create();
+        LuantiServer::factory()->hetznerVm()->create([
+            'hetzner_name' => $this->vmData()['name'], 'hetzner_status' => 'deleted', 'deleted_at' => now(),
+        ]);
+        Http::preventStrayRequests();
+
+        try {
+            app(HetznerVirtualMachines::class)->create($admin, $this->vmData());
+            $this->fail('A name retained in historical records could be reused.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('name', $exception->errors());
+        }
+
+        Http::assertNothingSent();
+    }
+
     public function test_status_refresh_updates_running_vm_and_handles_absent_public_ips(): void
     {
         $admin = User::factory()->globalAdmin()->create();
