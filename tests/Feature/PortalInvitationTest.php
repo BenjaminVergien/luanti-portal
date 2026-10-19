@@ -87,7 +87,7 @@ class PortalInvitationTest extends TestCase
         $mail->assertSeeInHtml($organization->name);
         $mail->assertSeeInHtml($label);
         $mail->assertSeeInText("Du wurdest zur Einrichtung {$organization->name} als {$label} eingeladen.");
-        foreach (['Melde dich mit der eingeladenen E-Mail-Adresse an', 'Bestätige anschließend deine E-Mail-Adresse', '16.10.2026 18:30 Uhr (Europe/Berlin).', 'Du erwartest keine Einladung?', 'Bitte teile diesen persönlichen Link nicht mit anderen.'] as $content) {
+        foreach (['Wenn du noch kein Konto im Luanti-Portal hast', 'registriere dich zunächst mit der E-Mail-Adresse, an die diese Einladung gesendet wurde', 'Bestätige anschließend deine E-Mail-Adresse über die Bestätigungs-E-Mail', 'Danach kannst du die Einladung im Portal annehmen.', 'Wenn du bereits ein Konto im Luanti-Portal besitzt', 'melde dich mit der eingeladenen E-Mail-Adresse an, um die Einladung anzunehmen', 'Falls deine E-Mail-Adresse noch nicht bestätigt ist, bestätige sie bitte zuerst.', '16.10.2026 18:30 Uhr (Europe/Berlin).', 'Du erwartest keine Einladung?', 'Bitte teile diesen persönlichen Link nicht mit anderen.'] as $content) {
             $mail->assertSeeInHtml($content);
             $mail->assertSeeInText($content);
         }

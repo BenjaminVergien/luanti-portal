@@ -9,7 +9,9 @@ Du wurdest als {!! $invitation->internal_role->label() !!} eingeladen.
 
 Diese Einladung ist für {!! $invitation->email !!} bestimmt.
 
-Melde dich mit der eingeladenen E-Mail-Adresse an oder registriere dich zuerst. Bestätige anschließend deine E-Mail-Adresse und nimm die Einladung an.
+Wenn du noch kein Konto im Luanti-Portal hast, klicke auf „Einladung öffnen“ und registriere dich zunächst mit der E-Mail-Adresse, an die diese Einladung gesendet wurde. Bestätige anschließend deine E-Mail-Adresse über die Bestätigungs-E-Mail. Danach kannst du die Einladung im Portal annehmen.
+
+Wenn du bereits ein Konto im Luanti-Portal besitzt, klicke auf „Einladung öffnen“ und melde dich mit der eingeladenen E-Mail-Adresse an, um die Einladung anzunehmen. Falls deine E-Mail-Adresse noch nicht bestätigt ist, bestätige sie bitte zuerst.
 
 Einladung öffnen: {!! $acceptUrl !!}
 
